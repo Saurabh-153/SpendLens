@@ -16,7 +16,9 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
-from ._common import get_db_dep
+from ._common import get_db_dep, row_dict
+from db.engine import get_session
+from db.models import Card, CardMerchantRule
 
 router = APIRouter(prefix="/spendlens/api", tags=["cards"])
 
@@ -125,7 +127,7 @@ async def cards_upload(files: list[UploadFile] = File(...), password: str = Form
 
 
 @router.post("/cards/merchant-rule")
-def cards_merchant_rule(data: MerchantRule, db=Depends(get_db_dep)):
+def cards_merchant_rule(data: MerchantRule, db=Depends(get_db_dep), session=Depends(get_session)):
     """Correct a merchant's cashback class. The correction is saved and re-applied to history."""
     if not data.pattern.strip():
         raise HTTPException(status_code=400, detail="A pattern is required")
@@ -140,11 +142,11 @@ def cards_merchant_rule(data: MerchantRule, db=Depends(get_db_dep)):
         # (three clicks through the dropdown made three rules, and only the newest counted).
         pattern = data.pattern.strip().upper()
         ids = [c["id"] for c in cards.family_of(db, card["id"])]
-        db.execute(f"DELETE FROM card_merchant_rules WHERE pattern=? AND match_type=? AND card_id IN ({','.join('?' * len(ids))})",
-                   (pattern, data.match_type, *ids))
-        db.execute("""INSERT INTO card_merchant_rules (card_id, pattern, match_type, cls)
-                      VALUES (?,?,?,?)""", (card["id"], pattern, data.match_type, data.cls))
-        db.commit()
+        session.query(CardMerchantRule).filter(
+            CardMerchantRule.pattern == pattern, CardMerchantRule.match_type == data.match_type,
+            CardMerchantRule.card_id.in_(ids)).delete(synchronize_session=False)
+        session.add(CardMerchantRule(card_id=card["id"], pattern=pattern, match_type=data.match_type, cls=data.cls))
+        session.commit()
         cards.reclassify_card(db, card["id"])
         return {"ok": True}
     finally:
@@ -152,27 +154,29 @@ def cards_merchant_rule(data: MerchantRule, db=Depends(get_db_dep)):
 
 
 @router.get("/cards/merchant-rules")
-def cards_merchant_rules(card_id: int | None = None, db=Depends(get_db_dep)):
+def cards_merchant_rules(card_id: int | None = None, db=Depends(get_db_dep), session=Depends(get_session)):
     try:
         card = cards.get_card(db, card_id)
         if not card:
             return []
-        return [dict(r) for r in db.execute(
-            "SELECT * FROM card_merchant_rules WHERE card_id IS NULL OR card_id=? ORDER BY id DESC",
-            (card["id"],))]
+        rules = session.query(CardMerchantRule).filter(
+            (CardMerchantRule.card_id.is_(None)) | (CardMerchantRule.card_id == card["id"])
+        ).order_by(CardMerchantRule.id.desc()).all()
+        return [row_dict(r) for r in rules]
     finally:
         db.close()
 
 
 @router.delete("/cards/merchant-rules/{rid}")
-def cards_delete_merchant_rule(rid: int, db=Depends(get_db_dep)):
+def cards_delete_merchant_rule(rid: int, db=Depends(get_db_dep), session=Depends(get_session)):
     try:
-        row = db.execute("SELECT card_id FROM card_merchant_rules WHERE id=?", (rid,)).fetchone()
-        if not row:
+        rule = session.get(CardMerchantRule, rid)
+        if not rule:
             raise HTTPException(status_code=404, detail="Rule not found")
-        db.execute("DELETE FROM card_merchant_rules WHERE id=?", (rid,))
-        db.commit()
-        card = cards.get_card(db, row["card_id"])
+        card_id = rule.card_id
+        session.delete(rule)
+        session.commit()
+        card = cards.get_card(db, card_id)
         if card:
             cards.reclassify_card(db, card["id"])
         return {"ok": True}
@@ -311,7 +315,7 @@ def cards_patch(cid: int, data: CardPatch, db=Depends(get_db_dep)):
 
 
 @router.put("/cards/{cid}")
-def cards_update(cid: int, data: CardSettings, db=Depends(get_db_dep)):
+def cards_update(cid: int, data: CardSettings, db=Depends(get_db_dep), session=Depends(get_session)):
     """Edit a card. The name, reward scheme and rates apply to every number the card has had; the
     billing cycle applies to every card on the same bill, because they share one due date. Saving
     the cycle marks it verified: it means you have checked it against a statement."""
@@ -338,18 +342,19 @@ def cards_update(cid: int, data: CardSettings, db=Depends(get_db_dep)):
             raise HTTPException(status_code=400, detail="Rate must be between 0 and 30% a year")
         name = (data.name or "").strip()
         family = [c["id"] for c in cards.family_of(db, cid)]
-        for i in family:
-            db.execute("""UPDATE cards SET credit_limit=?, annual_fee=?, fee_waiver_spend=?, cashback_cap=?, rates=?,
-                          profile=? WHERE id=?""",
-                       (data.credit_limit, data.annual_fee, data.fee_waiver_spend, data.cashback_cap,
-                        json.dumps(rates), profile, i))
+        session.query(Card).filter(Card.id.in_(family)).update({
+            "credit_limit": data.credit_limit, "annual_fee": data.annual_fee,
+            "fee_waiver_spend": data.fee_waiver_spend, "cashback_cap": data.cashback_cap,
+            "rates": json.dumps(rates), "profile": profile,
+        }, synchronize_session=False)
         if name:
-            db.execute("UPDATE cards SET name=? WHERE id=?", (name, cid))
-        for c in cards.account_cards(db, card["account_id"]):   # one bill, one cycle
-            db.execute("""UPDATE cards SET statement_day=?, grace_days=?, pay_buffer_days=?, float_rate=?,
-                          cycle_verified=1 WHERE id=?""",
-                       (data.statement_day, data.grace_days, data.pay_buffer_days, data.float_rate, c["id"]))
-        db.commit()
+            session.query(Card).filter(Card.id == cid).update({"name": name}, synchronize_session=False)
+        account_ids = [c["id"] for c in cards.account_cards(db, card["account_id"])]   # one bill, one cycle
+        session.query(Card).filter(Card.id.in_(account_ids)).update({
+            "statement_day": data.statement_day, "grace_days": data.grace_days,
+            "pay_buffer_days": data.pay_buffer_days, "float_rate": data.float_rate, "cycle_verified": 1,
+        }, synchronize_session=False)
+        session.commit()
         cards.reclassify_card(db, cid)
         return {"ok": True}
     finally:
