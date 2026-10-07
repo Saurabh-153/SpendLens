@@ -328,7 +328,7 @@ def set_budget(data: BudgetSet, db=Depends(get_db_dep)):
     if data.income < 0 or not 0 <= data.savings_amount <= data.income:
         raise HTTPException(status_code=400, detail="Savings must be between 0 and the salary")
     db.execute("""INSERT INTO budget_history (from_month, income, savings_amount) VALUES (?,?,?)
-                  ON CONFLICT(from_month) DO UPDATE SET income=excluded.income, savings_amount=excluded.savings_amount""",
+                  ON CONFLICT(user_id, from_month) DO UPDATE SET income=excluded.income, savings_amount=excluded.savings_amount""",
                (month, round(data.income, 2), round(data.savings_amount, 2)))
     db.commit()
     db.close()

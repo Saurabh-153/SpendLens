@@ -26,20 +26,33 @@ SEED_GOALS = [("Second Car", 1967151, 2034), ("Anaya Higher Education", 5000000,
               ("Anaya Marriage", 10000000, 2048), ("Second Child Marriage", 12000000, 2055)]
 
 
-def ensure(db):
+def ensure(db, user_id=1):
+    # Shapes below are the post-multi-user shape directly (surrogate id + user_id, unique on
+    # (user_id, <key>)), matching what Alembic's migrations already rebuilt the live db to -
+    # so a brand-new database (tests, CI, a fresh machine) lands on the same schema without
+    # ever needing to run those ALTER-based migrations.
     db.executescript("""
-        CREATE TABLE IF NOT EXISTS portfolio_snapshots (snap_date TEXT PRIMARY KEY, total REAL, invested REAL, groups TEXT);
-        CREATE TABLE IF NOT EXISTS portfolio_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, target_amount REAL NOT NULL, target_year INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS portfolio_plan (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1,
+            snap_date TEXT NOT NULL, total REAL, invested REAL, groups TEXT,
+            UNIQUE (user_id, snap_date)
+        );
+        CREATE TABLE IF NOT EXISTS portfolio_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, target_amount REAL NOT NULL, target_year INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS portfolio_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1,
+            key TEXT NOT NULL, value TEXT,
+            UNIQUE (user_id, key)
+        );
     """)
-    if not db.execute("SELECT 1 FROM portfolio_plan WHERE key='goals_seeded'").fetchone():
-        db.executemany("INSERT INTO portfolio_goals (name, target_amount, target_year) VALUES (?,?,?)", SEED_GOALS)
-        db.execute("INSERT INTO portfolio_plan (key, value) VALUES ('goals_seeded', '1')")
+    if not db.execute("SELECT 1 FROM portfolio_plan WHERE key='goals_seeded' AND user_id=?", (user_id,)).fetchone():
+        db.executemany("INSERT INTO portfolio_goals (name, target_amount, target_year, user_id) VALUES (?,?,?,?)",
+                        [(*g, user_id) for g in SEED_GOALS])
+        db.execute("INSERT INTO portfolio_plan (key, value, user_id) VALUES ('goals_seeded', '1', ?)", (user_id,))
         db.commit()
 
 
-def get_plan(db, key, default):
-    r = db.execute("SELECT value FROM portfolio_plan WHERE key=?", (key,)).fetchone()
+def get_plan(db, key, default, user_id=1):
+    r = db.execute("SELECT value FROM portfolio_plan WHERE key=? AND user_id=?", (key, user_id)).fetchone()
     if not r:
         return default
     try:
@@ -48,8 +61,9 @@ def get_plan(db, key, default):
         return default
 
 
-def set_plan(db, key, value):
-    db.execute("INSERT INTO portfolio_plan (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+def set_plan(db, key, value, user_id=1):
+    db.execute("""INSERT INTO portfolio_plan (key, value, user_id) VALUES (?,?,?)
+                  ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value), user_id))
     db.commit()
 
 
@@ -65,13 +79,13 @@ def group_totals(held):
     return {k: {kk: round(vv, 2) if kk != "count" else vv for kk, vv in v.items()} for k, v in out.items()}
 
 
-def record_snapshot(db, held, today=None):
-    ensure(db)
+def record_snapshot(db, held, today=None, user_id=1):
+    ensure(db, user_id)
     today = (today or date.today()).isoformat()
     g = group_totals(held)
-    db.execute("""INSERT INTO portfolio_snapshots (snap_date, total, invested, groups) VALUES (?,?,?,?)
-                  ON CONFLICT(snap_date) DO UPDATE SET total=excluded.total, invested=excluded.invested, groups=excluded.groups""",
-               (today, round(sum(h["present"] for h in held), 2), round(sum(h["invested"] for h in held), 2), json.dumps(g)))
+    db.execute("""INSERT INTO portfolio_snapshots (snap_date, total, invested, groups, user_id) VALUES (?,?,?,?,?)
+                  ON CONFLICT(user_id, snap_date) DO UPDATE SET total=excluded.total, invested=excluded.invested, groups=excluded.groups""",
+               (today, round(sum(h["present"] for h in held), 2), round(sum(h["invested"] for h in held), 2), json.dumps(g), user_id))
     db.commit()
 
 
