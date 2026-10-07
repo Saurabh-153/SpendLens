@@ -1,7 +1,6 @@
 """Importing this package registers every model on Base.metadata, for Alembic autogenerate.
 
-Models are split by domain to mirror routes/*_routes.py. Portfolio and expense domains exist
-so far; cards lands in a later phase of the SQLAlchemy migration.
+Models are split by domain to mirror routes/*_routes.py.
 """
 from .portfolio import (  # noqa: F401
     Holding,
@@ -19,4 +18,12 @@ from .expense import (  # noqa: F401
     Subcategory,
     SubcategoryRule,
     Settings,
+)
+from .cards import (  # noqa: F401
+    CardAccount,
+    Card,
+    CardStatement,
+    CardTxn,
+    CardMerchantRule,
+    CardPerk,
 )
