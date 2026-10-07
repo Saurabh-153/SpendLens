@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="SpendLens - personal expense and portfolio tracker" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Doto:wght@400..900&display=swap" rel="stylesheet" />
+    <script>
+      // Apply the saved light/dark mode before first paint so nobody sees a flash; the app then applies the full theme.
+      try { var p = localStorage.getItem('spendlens.theme') || 'auto';
+        var m = p === 'auto' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : (localStorage.getItem('spendlens.theme.mode') || 'dark');
+        document.documentElement.dataset.theme = m; } catch (e) {}
+    </script>
+    <title>SpendLens</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

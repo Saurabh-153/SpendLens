@@ -1,0 +1,49 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Theme palettes. The app sets data-theme="light" | "dark" on <html> (see themeStore.ts); dark is the default. */
+:root {
+  color-scheme: dark;
+  --bg: #0f1117; --surface: #181c27; --surface2: #1e2332; --border: #252b3b; --hairline: rgba(255,255,255,0.05);
+  --text: #e4e8f0; --muted: #7a85a0; --side-bg: #1d2232; --danger-border: #5a2a32; --today: #facc15;
+  --ov-1: rgba(255,255,255,.015); --ov-2: rgba(255,255,255,.025); --ov-3: rgba(255,255,255,.032);
+  --ov-4: rgba(255,255,255,.045); --ov-5: rgba(255,255,255,.07); --ov-6: rgba(255,255,255,.1);
+  --shadow: rgba(0,0,0,.5); --scroll: #252b3b;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f5fa; --surface: #ffffff; --surface2: #edf0f7; --border: #dbe0ec; --hairline: rgba(15,23,42,0.09);
+  --text: #1a2033; --muted: #5d6882; --side-bg: #f0f2f8; --danger-border: #f3b7c0; --today: #b45309;
+  --ov-1: rgba(15,23,42,.02); --ov-2: rgba(15,23,42,.035); --ov-3: rgba(15,23,42,.04);
+  --ov-4: rgba(15,23,42,.05); --ov-5: rgba(15,23,42,.1); --ov-6: rgba(15,23,42,.12);
+  --shadow: rgba(15,23,42,.18); --scroll: #c9d0e0;
+}
+
+body { background: var(--bg-full, var(--bg)); background-attachment: fixed; color: var(--text); font-family: var(--font, Inter, system-ui, sans-serif); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 3px; }
+select { appearance: auto; }
+button { font-family: inherit; }
+
+/* Headings and the logo can use a theme's display face (e.g. the dot-matrix font of the CMF themes). */
+h2, .brand { font-family: var(--font-display, inherit); font-weight: var(--display-weight, 700); }
+
+.gear-btn svg { transition: transform .5s ease; }
+.gear-btn:hover { background: var(--surface2) !important; color: var(--text) !important; }
+.gear-btn:hover svg { transform: rotate(90deg); }
+
+/* Hero popup: a jump from below the screen with squash and stretch, then a landing. */
+@keyframes hero-jump {
+  0%   { transform: translateY(125%) scale(.92, 1.08); }
+  38%  { transform: translateY(-42%) scale(.94, 1.08) rotate(-5deg); }
+  58%  { transform: translateY(-14%) scale(1, 1) rotate(3deg); }
+  74%  { transform: translateY(0) scale(1.09, .9); }
+  88%  { transform: translateY(-3%) scale(.98, 1.03); }
+  100% { transform: translateY(0) scale(1, 1); }
+}
+@keyframes hero-leave { from { transform: translateY(0); } to { transform: translateY(130%); } }
+@keyframes hero-pulse { from { opacity: .3; } to { opacity: .9; } }
+.hero-jump { animation: hero-jump .9s cubic-bezier(.3, .7, .4, 1) both; }
+.hero-leave { animation: hero-leave .35s ease-in both; }
+.hero-pulse { animation: hero-pulse .9s ease-in-out infinite alternate; }
+@media (prefers-reduced-motion: reduce) { .hero-jump, .hero-leave { animation-duration: .01s; } .hero-pulse { animation: none; } }

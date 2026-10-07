@@ -1,0 +1,13 @@
+{
+  "name": "workspace",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --filter @workspace/spendlens run dev",
+    "build": "pnpm --filter @workspace/spendlens run build",
+    "typecheck": "pnpm --filter @workspace/spendlens run typecheck",
+    "test": "python -m pytest",
+    "check": "pnpm run typecheck && pnpm run build && pnpm run test"
+  }
+}

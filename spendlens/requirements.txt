@@ -1,0 +1,6 @@
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pypdf>=5.0            # reading password-protected credit-card statements
+python-multipart>=0.0.9  # statement file uploads
+anthropic>=0.40       # optional: Claude fallback for unrecognised statement formats (needs ANTHROPIC_API_KEY)
+openpyxl>=3.1         # reading Excel activity exports (American Express)
