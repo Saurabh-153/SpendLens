@@ -34,29 +34,59 @@ def upgrade() -> None:
         "idx_holding_snapshots_holding", "holding_snapshots", ["holding_id", "snap_date"]
     )
 
-    # portfolio_snapshots: was PRIMARY KEY(snap_date), single-user. Rebuild with a
-    # surrogate id and (user_id, snap_date) unique so multiple users can each have
-    # their own snapshot for the same date. Existing rows backfill user_id=1.
-    with op.batch_alter_table("portfolio_snapshots", recreate="always") as batch_op:
-        batch_op.add_column(sa.Column("id", sa.Integer(), nullable=True))
-        batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
-    op.execute("UPDATE portfolio_snapshots SET id = rowid WHERE id IS NULL")
-    with op.batch_alter_table("portfolio_snapshots", recreate="always") as batch_op:
-        batch_op.alter_column("id", nullable=False)
-        batch_op.create_primary_key("pk_portfolio_snapshots", ["id"])
-        batch_op.create_unique_constraint(
-            "uq_portfolio_snapshots_user_date", ["user_id", "snap_date"]
-        )
+    # portfolio_snapshots and portfolio_plan are created lazily by portfolio.py's ensure(),
+    # the first time a route touches them - not by database.py's migrations, which run
+    # unconditionally at every startup. On a brand-new database, app.py's `alembic upgrade
+    # head` runs before any request does, so neither table exists yet: ALTERing them would
+    # fail outright. Create them directly in their final shape in that case; only ALTER the
+    # old shape (and backfill existing rows to user_id=1) when there's data to preserve.
+    existing = sa.inspect(op.get_bind()).get_table_names()
 
-    # portfolio_plan: was PRIMARY KEY(key), single-user. Same rebuild.
-    with op.batch_alter_table("portfolio_plan", recreate="always") as batch_op:
-        batch_op.add_column(sa.Column("id", sa.Integer(), nullable=True))
-        batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
-    op.execute("UPDATE portfolio_plan SET id = rowid WHERE id IS NULL")
-    with op.batch_alter_table("portfolio_plan", recreate="always") as batch_op:
-        batch_op.alter_column("id", nullable=False)
-        batch_op.create_primary_key("pk_portfolio_plan", ["id"])
-        batch_op.create_unique_constraint("uq_portfolio_plan_user_key", ["user_id", "key"])
+    if "portfolio_snapshots" not in existing:
+        op.create_table(
+            "portfolio_snapshots",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"),
+            sa.Column("snap_date", sa.Text(), nullable=False),
+            sa.Column("total", sa.Float(), nullable=True),
+            sa.Column("invested", sa.Float(), nullable=True),
+            sa.Column("groups", sa.Text(), nullable=True),
+            sa.UniqueConstraint("user_id", "snap_date", name="uq_portfolio_snapshots_user_date"),
+        )
+    else:
+        # portfolio_snapshots: was PRIMARY KEY(snap_date), single-user. Rebuild with a
+        # surrogate id and (user_id, snap_date) unique so multiple users can each have
+        # their own snapshot for the same date. Existing rows backfill user_id=1.
+        with op.batch_alter_table("portfolio_snapshots", recreate="always") as batch_op:
+            batch_op.add_column(sa.Column("id", sa.Integer(), nullable=True))
+            batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
+        op.execute("UPDATE portfolio_snapshots SET id = rowid WHERE id IS NULL")
+        with op.batch_alter_table("portfolio_snapshots", recreate="always") as batch_op:
+            batch_op.alter_column("id", nullable=False)
+            batch_op.create_primary_key("pk_portfolio_snapshots", ["id"])
+            batch_op.create_unique_constraint(
+                "uq_portfolio_snapshots_user_date", ["user_id", "snap_date"]
+            )
+
+    if "portfolio_plan" not in existing:
+        op.create_table(
+            "portfolio_plan",
+            sa.Column("id", sa.Integer(), primary_key=True),
+            sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"),
+            sa.Column("key", sa.Text(), nullable=False),
+            sa.Column("value", sa.Text(), nullable=True),
+            sa.UniqueConstraint("user_id", "key", name="uq_portfolio_plan_user_key"),
+        )
+    else:
+        # portfolio_plan: was PRIMARY KEY(key), single-user. Same rebuild.
+        with op.batch_alter_table("portfolio_plan", recreate="always") as batch_op:
+            batch_op.add_column(sa.Column("id", sa.Integer(), nullable=True))
+            batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
+        op.execute("UPDATE portfolio_plan SET id = rowid WHERE id IS NULL")
+        with op.batch_alter_table("portfolio_plan", recreate="always") as batch_op:
+            batch_op.alter_column("id", nullable=False)
+            batch_op.create_primary_key("pk_portfolio_plan", ["id"])
+            batch_op.create_unique_constraint("uq_portfolio_plan_user_key", ["user_id", "key"])
 
 
 def downgrade() -> None:

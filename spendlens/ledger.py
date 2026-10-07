@@ -16,10 +16,14 @@ DIRECT = ("MF", "FD", "PF")
 
 
 def ensure(db):
+    # user_id is baked in here (not left for database.py's _m003_user_id_columns to ALTER in)
+    # because this table is created lazily, on first use - _add_column skips tables that don't
+    # exist yet, so on a genuinely fresh database that migration would otherwise permanently
+    # no-op before this CREATE ever runs. Same reasoning as portfolio_goals in portfolio.py.
     db.execute("""CREATE TABLE IF NOT EXISTS transactions (
         id INTEGER PRIMARY KEY AUTOINCREMENT, holding_id INTEGER, name TEXT DEFAULT '', tx_date TEXT NOT NULL, kind TEXT NOT NULL,
         qty REAL DEFAULT 0, price REAL DEFAULT 0, amount REAL DEFAULT 0, fees REAL DEFAULT 0, realized REAL DEFAULT 0,
-        note TEXT DEFAULT '', source TEXT DEFAULT 'manual', applied INTEGER DEFAULT 0)""")
+        note TEXT DEFAULT '', source TEXT DEFAULT 'manual', applied INTEGER DEFAULT 0, user_id INTEGER DEFAULT 1)""")
     db.commit()
 
 

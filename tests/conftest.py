@@ -36,9 +36,12 @@ FIXTURE_HOLDINGS = [
 
 @pytest.fixture(scope="session")
 def seeded_db():
-    """A freshly seeded database: the schema, init_db's seed data, and FIXTURE_HOLDINGS."""
+    """A freshly seeded database: the schema, init_db's seed data, Alembic's migrations on
+    top (same sequence app.py runs - see db/migrate.py), and FIXTURE_HOLDINGS."""
     import database
+    from db.migrate import upgrade_head
     database.init_db()
+    upgrade_head()
     conn = database.get_db()
     if conn.execute("SELECT COUNT(*) FROM holdings").fetchone()[0] == 0:
         conn.executemany(

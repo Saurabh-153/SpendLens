@@ -115,12 +115,9 @@ def _migrate_admin(conn):
             PRIMARY KEY (category_id, from_month)
         );
         CREATE TABLE IF NOT EXISTS budget_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL DEFAULT 1,
-            from_month TEXT NOT NULL,
+            from_month TEXT PRIMARY KEY,
             income REAL NOT NULL,
-            savings_amount REAL NOT NULL,
-            UNIQUE (user_id, from_month)
+            savings_amount REAL NOT NULL
         );
     """)
     # savings used to be a % of income; it is now an amount (budget cap = salary - savings)
@@ -133,8 +130,9 @@ def _migrate_admin(conn):
                  SELECT id, '0000-00', target_pct FROM categories
                  WHERE id NOT IN (SELECT category_id FROM category_targets)""")
     if c.execute("SELECT COUNT(*) FROM budget_history").fetchone()[0] == 0:
-        c.execute("""INSERT INTO budget_history (from_month, income, savings_amount)
-                     SELECT '0000-00', income, income * savings_target / 100.0 FROM settings WHERE user_id=1""")
+        settings_key = "user_id" if "user_id" in {r[1] for r in c.execute("PRAGMA table_info(settings)")} else "id"
+        c.execute(f"""INSERT INTO budget_history (from_month, income, savings_amount)
+                     SELECT '0000-00', income, income * savings_target / 100.0 FROM settings WHERE {settings_key}=1""")
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +250,6 @@ def _m004_credit_cards(conn):
 
         CREATE TABLE IF NOT EXISTS card_merchant_rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL DEFAULT 1, -- card_id can be NULL ("every card"), which under
-                                                 -- multi-user has to mean every card of this user
             card_id INTEGER,                   -- NULL applies to every card
             pattern TEXT NOT NULL,
             match_type TEXT DEFAULT 'contains',-- contains / prefix / regex
@@ -318,7 +314,6 @@ def _m006_card_accounts(conn):
     """
     conn.execute("""CREATE TABLE IF NOT EXISTS card_accounts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER NOT NULL DEFAULT 1,
                         issuer TEXT DEFAULT '',
                         label TEXT DEFAULT '')""")
     _add_column(conn, "cards", "account_id", "INTEGER")
@@ -438,7 +433,7 @@ def init_db():
 
     c.executescript("""
         CREATE TABLE IF NOT EXISTS settings (
-            user_id INTEGER PRIMARY KEY DEFAULT 1,
+            id INTEGER PRIMARY KEY CHECK (id = 1),
             income INTEGER DEFAULT 245000,
             savings_target INTEGER DEFAULT 44,
             currency TEXT DEFAULT 'INR',
@@ -488,8 +483,11 @@ def init_db():
 
     """)
 
-    # Seed settings
-    c.execute("INSERT OR IGNORE INTO settings (user_id) VALUES (1)")
+    # Seed settings. Column is `id` pre-Alembic, `user_id` on a database that has already run
+    # Alembic's migrations (this runs again on every startup, including against an
+    # already-migrated real database, so both shapes have to work here).
+    settings_key = "user_id" if "user_id" in {r[1] for r in c.execute("PRAGMA table_info(settings)")} else "id"
+    c.execute(f"INSERT OR IGNORE INTO settings ({settings_key}) VALUES (1)")
 
     # Starter data goes into a brand-new database only. It used to be re-inserted on every start, so a category you
     # deleted (the app lets you delete one that never had an expense) came straight back the next time the server ran.

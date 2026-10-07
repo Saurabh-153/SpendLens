@@ -27,22 +27,22 @@ SEED_GOALS = [("Second Car", 1967151, 2034), ("Anaya Higher Education", 5000000,
 
 
 def ensure(db, user_id=1):
-    # Shapes below are the post-multi-user shape directly (surrogate id + user_id, unique on
-    # (user_id, <key>)), matching what Alembic's migrations already rebuilt the live db to -
-    # so a brand-new database (tests, CI, a fresh machine) lands on the same schema without
-    # ever needing to run those ALTER-based migrations.
+    # This CREATE is the pre-multi-user baseline shape only (what database.py's old hand-rolled
+    # migrations produced). It only matters for a database so new Alembic hasn't run against it
+    # yet; app.py runs `alembic upgrade head` at startup right after this, which ALTERs these
+    # tables to the real (user_id-aware) shape every function below actually expects. For an
+    # already-migrated database "IF NOT EXISTS" makes this whole statement a no-op, since the
+    # table already exists in its final shape - which is why it's still safe to call per-request.
+    #
+    # portfolio_goals is the one exception: database.py's _m003_user_id_columns tries to ALTER
+    # it to add user_id, but _add_column silently skips tables that don't exist yet - and this
+    # table is created lazily right here, not by database.py's own startup migrations. On a
+    # genuinely fresh database _m003 runs (and no-ops) before this CREATE ever fires, so that
+    # migration can never add the column; it has to be baked into the CREATE itself instead.
     db.executescript("""
-        CREATE TABLE IF NOT EXISTS portfolio_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1,
-            snap_date TEXT NOT NULL, total REAL, invested REAL, groups TEXT,
-            UNIQUE (user_id, snap_date)
-        );
-        CREATE TABLE IF NOT EXISTS portfolio_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1, name TEXT NOT NULL, target_amount REAL NOT NULL, target_year INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS portfolio_plan (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 1,
-            key TEXT NOT NULL, value TEXT,
-            UNIQUE (user_id, key)
-        );
+        CREATE TABLE IF NOT EXISTS portfolio_snapshots (snap_date TEXT PRIMARY KEY, total REAL, invested REAL, groups TEXT);
+        CREATE TABLE IF NOT EXISTS portfolio_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, target_amount REAL NOT NULL, target_year INTEGER NOT NULL, user_id INTEGER DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS portfolio_plan (key TEXT PRIMARY KEY, value TEXT);
     """)
     if not db.execute("SELECT 1 FROM portfolio_plan WHERE key='goals_seeded' AND user_id=?", (user_id,)).fetchone():
         db.executemany("INSERT INTO portfolio_goals (name, target_amount, target_year, user_id) VALUES (?,?,?,?)",

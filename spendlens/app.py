@@ -10,8 +10,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from database import init_db
 from routes.api import router, refresh_and_snapshot
 from prices import start_scheduler
+from db.migrate import upgrade_head
 
 init_db()
+upgrade_head()  # applies Alembic's migrations on top of init_db()'s baseline shape - see db/migrate.py
 
 app = FastAPI(title="SpendLens API")
 
