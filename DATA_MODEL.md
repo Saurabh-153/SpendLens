@@ -13,6 +13,7 @@ erDiagram
     holdings ||--o{ transactions : "ledger"
     holdings ||--o{ sip_log : "SIP applied"
     holdings ||--o{ price_history : "daily price"
+    holdings ||--o{ holding_snapshots : "daily value"
     holding_groups ||--o{ holdings : "grp (by name)"
 
     categories {
@@ -30,7 +31,9 @@ erDiagram
         real target_pct "percent of salary"
     }
     budget_history {
-        text from_month PK "effective-dated, 0000-00 = initial"
+        int id PK "surrogate id (Alembic 459d2bc3ff86)"
+        int user_id "default 1; unique with from_month"
+        text from_month "effective-dated, 0000-00 = initial"
         int income "monthly salary"
         real savings_amount "fixed saving in rupees"
     }
@@ -125,19 +128,33 @@ erDiagram
         text detail
     }
     portfolio_snapshots {
-        text snap_date PK "one row per day"
+        int id PK "surrogate id (Alembic 0a3ec7a2c0e3)"
+        int user_id "default 1; unique with snap_date"
+        text snap_date "one row per user per day"
         real total "net worth"
         real invested
         text groups "JSON value by group"
     }
+    holding_snapshots {
+        int id PK
+        int holding_id FK
+        text snap_date "one row per holding per day; unique with holding_id"
+        real qty
+        real cmp
+        real present
+        real invested
+    }
     portfolio_goals {
         int id PK
+        int user_id "default 1"
         text name
         real target_amount
         int target_year
     }
     portfolio_plan {
-        text key PK "targets, assumptions"
+        int id PK "surrogate id (Alembic 0a3ec7a2c0e3)"
+        int user_id "default 1; unique with key"
+        text key "targets, assumptions"
         text value "JSON"
     }
     schema_migrations {
@@ -153,6 +170,7 @@ erDiagram
     card_statements ||--o{ card_txns : "appeared on"
     card_accounts {
         int id PK
+        int user_id "default 1 (Alembic 7fa60c624af4)"
         text issuer
         text label
     }
@@ -217,6 +235,7 @@ erDiagram
     }
     card_merchant_rules {
         int id PK
+        int user_id "default 1 (Alembic 7fa60c624af4); card_id can be NULL, so this says whose 'every card'"
         int card_id FK "NULL applies to every card"
         text pattern
         text match_type "contains / prefix / regex"
@@ -242,12 +261,12 @@ Notes on the model:
 - **Effective dating.** A month uses the latest `category_targets` / `budget_history` row whose `from_month` is on or before that month, so changing a target or salary never rewrites earlier months. Budget cap = `income − savings_amount`.
 - **Category lifecycle.** A category is shown in a month if that month is within `start_month`–`end_month` *or* it already has expenses that month, so totals always agree with the data. The same rules apply to sub-categories.
 - **Sub-categories** are a reporting label: a category's total always equals the sum of its sub-categories plus *Unassigned*.
-- **Portfolio tables.** `holdings` is the current position; `transactions` is the dated history (it may update a holding but deleting a row never reverses it); `sip_log` guarantees a SIP is applied once per month; `portfolio_snapshots` holds one net-worth row per day; `price_history` / `price_runs` log the daily price job; `portfolio_goals` and `portfolio_plan` (key/value JSON) hold goals, target allocation and return assumptions. `holding_groups` is linked to `holdings.grp` by name, not by id.
+- **Portfolio tables.** `holdings` is the current position; `transactions` is the dated history (it may update a holding but deleting a row never reverses it); `sip_log` guarantees a SIP is applied once per month; `portfolio_snapshots` holds one net-worth row per user per day; `holding_snapshots` is the same idea per holding, so an individual stock or fund's value can be charted over time even though `holdings.cmp`/`qty` are overwritten in place on every price refresh; `price_history` / `price_runs` log the daily price job; `portfolio_goals` and `portfolio_plan` (key/value JSON) hold goals, target allocation and return assumptions. `holding_groups` is linked to `holdings.grp` by name, not by id.
 - **Exposure and tags.** `grp` is where a holding sits (and what targets are set against); `exposure` is one of Equity / Gold / Debt / Cash and is what the money is really invested in, so the exposure shares always add up to 100%. `tags` are optional extra labels (sector, theme) that may overlap; a holding also shows under a group filter named like one of its tags. The target Equity / Gold / Debt ratio, expected returns and time windows live in `portfolio_plan` under `mix_targets`, `mix_returns`, `mix_reach_years` and `mix_years`; Cash counts as Debt there. Older `exposure_targets` are still read as a fallback.
 - **Forecasts** are computed on request from `expenses`; nothing is stored (see `plan/spendlens-forecasting-ml-plan.md` for the planned `forecasts` tables).
 - **Billing accounts.** A card number and a bill are different things. `card_accounts` groups the cards that share one bill: an ICICI account list names several card numbers, and payments are posted under one yet settle all, so the due date, the payments and the *when to pay* answer belong to the account while spend and rewards belong to the card. Each card number is its own `cards` row. Which numbers are one *physical* card (a re-issue under a new number) is not stored: it is inferred from the dates on every read (`cards.lineage`), so it does not depend on upload order.
 - **Credit cards.** `cards` holds the card and its terms; `card_statements` one row per billing cycle, keyed by `period_to`, carrying both the cashback the statement *paid* (`cashback_reported`) and what the rules say it *should* have paid (`cashback_calc`) — the difference is shown on the dashboard rather than hidden. `card_txns` holds the transactions, de-duplicated by `row_hash` so re-importing an overlapping statement adds nothing, with `cls` (a reward class from the card's profile) deciding the rate. `card_merchant_rules` are your corrections to that classification; saving one re-applies the engine to all of history. `kind` separates what was *spent* from what the bank *billed*: net spend is purchases minus refunds plus EMI instalments, while interest, tax and fees are costs, not spend. **Card spend is not written into `expenses`**: the statements cover months that already have hand-entered expenses, so merging them would double count. Linking the two is a later, explicit step.
 - **Card perks.** `card_perks` is a card's benefits written down by hand (`spendlens/card_perks.py`): rewards, milestones, lounge access, fees, exclusions and caps, each with an optional yearly value (`value_yr`) and a `source`. A card is seeded once from its scheme's published terms (`cards.perks_seeded` guards the seed) with every row starting unconfirmed (`checked = 0`); after you confirm or edit one it is `checked = 1` and the list is yours. These rows are documentation only — nothing in the reward maths reads them. `cards.color` and `cards.sort_order` are display-only: a fixed colour per card (empty = auto-assigned) and the drag position on the Cards page.
-- **Migrations.** `schema_migrations` records which numbered steps from `MIGRATIONS` (`database.py`) have run; each applies once, and a timestamped `.bak` copy is taken before the first pending step on a database that has data. Version 1 is the baseline — the older idempotent `_migrate_admin` / `_migrate_holdings` / sub-category helpers, which still run on every start-up.
-- **`user_id`.** Every table with a surrogate `id` carries `user_id INTEGER DEFAULT 1`, added ahead of multi-user support so login does not need a schema rewrite. The key/value and effective-dated-by-month tables (`portfolio_plan`, `budget_history`, `category_targets`, `price_history`) need their primary keys widened instead, which happens with the login work itself.
-- A legacy `settings` table exists only so old databases can be migrated into `budget_history`. The unused tables `users`, `rebalance_targets` and `price_alerts` were dropped by migration 2; nothing ever read them.
+- **Migrations.** `schema_migrations` records which numbered steps from `MIGRATIONS` (`database.py`) have run; each applies once, and a timestamped `.bak` copy is taken before the first pending step on a database that has data. Version 1 is the baseline — the older idempotent `_migrate_admin` / `_migrate_holdings` / sub-category helpers, which still run on every start-up. **New schema changes go through Alembic** (`alembic/`, `spendlens/db/models/`) instead: `app.py` runs `init_db()` then Alembic's `upgrade_head()` immediately after, on every start-up, so a brand-new database and the live one always reach the same final shape. See the README's "Tests and migrations" section for how to add one.
+- **`user_id`.** Every table with a surrogate `id` carries `user_id INTEGER DEFAULT 1`, added ahead of multi-user support so login does not need a schema rewrite. The key/value and effective-dated-by-month tables that used to need their primary keys widened first (`portfolio_plan`, `budget_history`) have been — both are now keyed on `(user_id, key-ish column)` via Alembic. `category_targets` and `price_history` didn't need it: they're scoped to a user through their `category_id`/`holding_id` FK, which is itself already owned by a user. No route actually filters by `user_id` yet, though — every query still implicitly runs as user 1 until real multi-user login is built.
+- A legacy `settings` table exists only so old databases can be migrated into `budget_history`; it's now keyed on `user_id` rather than a hardcoded `id = 1`, for the same reason as the tables above. The unused tables `users`, `rebalance_targets` and `price_alerts` were dropped by migration 2; nothing ever read them.
