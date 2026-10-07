@@ -16,18 +16,12 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
-from ._common import get_db_dep
+from ._common import get_db_dep, row_dict as _row_dict
 from sqlalchemy import func
 from db.engine import get_session
 from db.models import Holding, HoldingGroup, PortfolioGoal, PortfolioSnapshot
 
 router = APIRouter(prefix="/spendlens/api", tags=["portfolio"])
-
-
-def _row_dict(obj):
-    """ORM instance -> plain dict, so it can feed _holding_out/dict(row) the same way a
-    sqlite3.Row from the old raw-cursor code did."""
-    return {c.key: getattr(obj, c.key) for c in obj.__table__.columns}
 
 
 class HoldingCreate(BaseModel):

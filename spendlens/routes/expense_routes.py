@@ -16,7 +16,10 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 
-from ._common import get_db_dep
+from sqlalchemy import func
+from ._common import get_db_dep, row_dict as _row_dict
+from db.engine import get_session
+from db.models import Category, CategoryTarget, Subcategory, SubcategoryRule, BudgetHistory
 
 router = APIRouter(prefix="/spendlens/api", tags=["expense"])
 
@@ -153,118 +156,117 @@ def ensure_sub_ok(db, category_id, sub_id, month, keep_sub_id=None):
         raise HTTPException(status_code=400, detail="Sub-category is not valid for this category and month")
 
 
-def get_category_or_404(db, cid):
-    row = db.execute("SELECT * FROM categories WHERE id=?", (cid,)).fetchone()
-    if not row:
+def get_category_or_404(session, cid):
+    cat = session.get(Category, cid)
+    if not cat:
         raise HTTPException(status_code=404, detail="Category not found")
-    return row
+    return cat
 
 
-def category_view(db, cid):
+def category_view(db, session, cid):
     today = current_month()
-    row = dict(get_category_or_404(db, cid))
-    t = db.execute("""SELECT target_pct FROM category_targets WHERE category_id=? AND from_month<=?
-                      ORDER BY from_month DESC LIMIT 1""", (cid, today)).fetchone()
-    row["target_pct"] = t["target_pct"] if t else 0
+    row = _row_dict(get_category_or_404(session, cid))
+    t = session.query(CategoryTarget).filter(CategoryTarget.category_id == cid, CategoryTarget.from_month <= today) \
+        .order_by(CategoryTarget.from_month.desc()).first()
+    row["target_pct"] = t.target_pct if t else 0
     row["status"] = category_status(row, today)
     row["has_data"] = bool(db.execute("SELECT 1 FROM expenses WHERE category_id=? LIMIT 1", (cid,)).fetchone())
     return row
 
 
 @router.get("/categories")
-def get_categories(month: str = Query(None), db=Depends(get_db_dep)):
+def get_categories(month: str = Query(None), db=Depends(get_db_dep), session=Depends(get_session)):
     """Without `month`: every category with its lifecycle status. With `month`: those shown in that month."""
     if month:
         result = categories_for_month(db, parse_month(month)[0])
     else:
-        ids = [r["id"] for r in db.execute("SELECT id FROM categories ORDER BY sort_order, id")]
-        result = [category_view(db, i) for i in ids]
+        ids = [c.id for c in session.query(Category.id).order_by(Category.sort_order, Category.id).all()]
+        result = [category_view(db, session, i) for i in ids]
     db.close()
     return result
 
 
 @router.post("/categories", status_code=201)
-def create_category(data: CategoryCreate, db=Depends(get_db_dep)):
+def create_category(data: CategoryCreate, db=Depends(get_db_dep), session=Depends(get_session)):
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
     start = parse_month(data.start_month)[0]
-    if db.execute("SELECT 1 FROM categories WHERE lower(name)=lower(?) AND end_month IS NULL", (name,)).fetchone():
+    if session.query(Category).filter(func.lower(Category.name) == name.lower(), Category.end_month.is_(None)).first():
         db.close()
         raise HTTPException(status_code=409, detail="An active category with this name already exists")
-    order = db.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM categories").fetchone()[0]
-    cur = db.execute("""INSERT INTO categories (name, icon, color, target_pct, hint, visible, sort_order, start_month)
-        VALUES (?,?,?,?,?,1,?,?)""", (name, data.icon, data.color, data.target_pct, data.hint, order, start))
-    db.execute("INSERT INTO category_targets (category_id, from_month, target_pct) VALUES (?,?,?)",
-               (cur.lastrowid, start, data.target_pct))
-    db.commit()
-    view = category_view(db, cur.lastrowid)
+    order = (session.query(func.max(Category.sort_order)).scalar() or 0) + 1
+    cat = Category(name=name, icon=data.icon, color=data.color, target_pct=data.target_pct,
+                    hint=data.hint, visible=1, sort_order=order, start_month=start)
+    session.add(cat)
+    session.flush()
+    session.add(CategoryTarget(category_id=cat.id, from_month=start, target_pct=data.target_pct))
+    session.commit()
+    view = category_view(db, session, cat.id)
     db.close()
     return view
 
 
 @router.put("/categories/reorder")
-def reorder_categories(data: ReorderRequest, db=Depends(get_db_dep)):
+def reorder_categories(data: ReorderRequest, session=Depends(get_session)):
     for i, cid in enumerate(data.ids, start=1):
-        db.execute("UPDATE categories SET sort_order=? WHERE id=?", (i, cid))
-    db.commit()
-    db.close()
+        session.query(Category).filter(Category.id == cid).update({"sort_order": i}, synchronize_session=False)
+    session.commit()
     return {"ok": True}
 
 
 @router.put("/categories/{cid}")
-def update_category(cid: int, data: CategoryUpdate, db=Depends(get_db_dep)):
+def update_category(cid: int, data: CategoryUpdate, db=Depends(get_db_dep), session=Depends(get_session)):
     """Rename / restyle. Label-only: applies to every month, no amounts change."""
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
-    get_category_or_404(db, cid)
-    db.execute("UPDATE categories SET name=?, icon=?, color=?, hint=? WHERE id=?",
-               (name, data.icon, data.color, data.hint, cid))
-    db.commit()
-    view = category_view(db, cid)
+    cat = get_category_or_404(session, cid)
+    cat.name, cat.icon, cat.color, cat.hint = name, data.icon, data.color, data.hint
+    session.commit()
+    view = category_view(db, session, cid)
     db.close()
     return view
 
 
 @router.post("/categories/{cid}/archive")
-def archive_category(cid: int, data: ArchiveRequest, db=Depends(get_db_dep)):
+def archive_category(cid: int, data: ArchiveRequest, db=Depends(get_db_dep), session=Depends(get_session)):
     """Hide a category from `from_month` onward (default next month); earlier months are unchanged."""
     from_month = parse_month(data.from_month or next_month(current_month()))[0]
-    cat = get_category_or_404(db, cid)
-    if from_month <= cat["start_month"]:
+    cat = get_category_or_404(session, cid)
+    if from_month <= cat.start_month:
         db.close()
         raise HTTPException(status_code=400, detail="Archive month must be after the month the category starts")
-    db.execute("UPDATE categories SET end_month=? WHERE id=?", (prev_month(from_month), cid))
+    cat.end_month = prev_month(from_month)
+    session.commit()
     later = db.execute("SELECT COUNT(DISTINCT substr(date,1,7)) FROM expenses WHERE category_id=? AND substr(date,1,7)>=?",
                        (cid, from_month)).fetchone()[0]
-    db.commit()
-    view = category_view(db, cid)
+    view = category_view(db, session, cid)
     db.close()
     return {**view, "months_with_data_after": later}
 
 
 @router.post("/categories/{cid}/restore")
-def restore_category(cid: int, db=Depends(get_db_dep)):
-    get_category_or_404(db, cid)
-    db.execute("UPDATE categories SET end_month=NULL WHERE id=?", (cid,))
-    db.commit()
-    view = category_view(db, cid)
+def restore_category(cid: int, db=Depends(get_db_dep), session=Depends(get_session)):
+    cat = get_category_or_404(session, cid)
+    cat.end_month = None
+    session.commit()
+    view = category_view(db, session, cid)
     db.close()
     return view
 
 
 @router.get("/categories/{cid}/usage")
-def category_usage(cid: int, db=Depends(get_db_dep)):
+def category_usage(cid: int, db=Depends(get_db_dep), session=Depends(get_session)):
     """What a category holds, so a delete can be double-checked: its entries, their total and date range, and what else
     would go with it. A category with entries can never be deleted (archive it instead)."""
     try:
-        get_category_or_404(db, cid)
+        get_category_or_404(session, cid)
         n, total, first, last = db.execute(
             "SELECT COUNT(*), COALESCE(SUM(amount), 0), MIN(date), MAX(date) FROM expenses WHERE category_id=?", (cid,)).fetchone()
         months = db.execute("SELECT COUNT(DISTINCT substr(date,1,7)) FROM expenses WHERE category_id=?", (cid,)).fetchone()[0]
-        subs = db.execute("SELECT COUNT(*) FROM subcategories WHERE category_id=?", (cid,)).fetchone()[0]
-        targets = db.execute("SELECT COUNT(*) FROM category_targets WHERE category_id=?", (cid,)).fetchone()[0]
+        subs = session.query(Subcategory).filter(Subcategory.category_id == cid).count()
+        targets = session.query(CategoryTarget).filter(CategoryTarget.category_id == cid).count()
         return {"entries": n, "total": round(total, 2), "first": first, "last": last, "months": months,
                 "subcategories": subs, "target_changes": targets, "can_delete": n == 0}
     finally:
@@ -272,119 +274,122 @@ def category_usage(cid: int, db=Depends(get_db_dep)):
 
 
 @router.delete("/categories/{cid}")
-def delete_category(cid: int, db=Depends(get_db_dep)):
+def delete_category(cid: int, db=Depends(get_db_dep), session=Depends(get_session)):
     """Hard delete only for categories that never had an expense; otherwise archive."""
-    get_category_or_404(db, cid)
+    cat = get_category_or_404(session, cid)
     if db.execute("SELECT 1 FROM expenses WHERE category_id=? LIMIT 1", (cid,)).fetchone():
         db.close()
         raise HTTPException(status_code=409, detail="Category has expense history - archive it instead")
     # With no expenses there is nothing to orphan. Its sub-categories and their rules go with it (they would otherwise
     # block the delete, since each refers to the category).
-    db.execute("DELETE FROM subcategory_rules WHERE category_id=?", (cid,))
-    db.execute("DELETE FROM subcategories WHERE category_id=?", (cid,))
-    db.execute("DELETE FROM category_targets WHERE category_id=?", (cid,))
-    db.execute("DELETE FROM categories WHERE id=?", (cid,))
-    db.commit()
+    session.query(SubcategoryRule).filter(SubcategoryRule.category_id == cid).delete(synchronize_session=False)
+    session.query(Subcategory).filter(Subcategory.category_id == cid).delete(synchronize_session=False)
+    session.query(CategoryTarget).filter(CategoryTarget.category_id == cid).delete(synchronize_session=False)
+    session.delete(cat)
+    session.commit()
     db.close()
     return {"ok": True}
 
 
 @router.get("/categories/{cid}/targets")
-def category_target_history(cid: int, db=Depends(get_db_dep)):
-    get_category_or_404(db, cid)
-    rows = db.execute("SELECT from_month, target_pct FROM category_targets WHERE category_id=? ORDER BY from_month",
-                      (cid,)).fetchall()
-    db.close()
-    return [dict(r) for r in rows]
+def category_target_history(cid: int, session=Depends(get_session)):
+    get_category_or_404(session, cid)
+    rows = session.query(CategoryTarget).filter(CategoryTarget.category_id == cid) \
+        .order_by(CategoryTarget.from_month).all()
+    return [{"from_month": r.from_month, "target_pct": r.target_pct} for r in rows]
 
 
 @router.put("/categories/{cid}/target")
-def set_category_target(cid: int, data: TargetSet, db=Depends(get_db_dep)):
+def set_category_target(cid: int, data: TargetSet, session=Depends(get_session)):
     """Target % valid from `from_month` onward; earlier months keep their previous target."""
     month = parse_month(data.from_month)[0]
     if not 0 <= data.target_pct <= 100:
         raise HTTPException(status_code=400, detail="Target must be between 0 and 100")
     data.target_pct = round(data.target_pct, 8)   # keep enough precision that a typed rupee amount round-trips exactly
-    get_category_or_404(db, cid)
-    db.execute("""INSERT INTO category_targets (category_id, from_month, target_pct) VALUES (?,?,?)
-                  ON CONFLICT(category_id, from_month) DO UPDATE SET target_pct=excluded.target_pct""",
-               (cid, month, data.target_pct))
-    db.commit()
-    db.close()
+    get_category_or_404(session, cid)
+    t = session.get(CategoryTarget, (cid, month))
+    if t:
+        t.target_pct = data.target_pct
+    else:
+        session.add(CategoryTarget(category_id=cid, from_month=month, target_pct=data.target_pct))
+    session.commit()
     return {"ok": True}
 
 
 @router.get("/budget")
-def budget_history(db=Depends(get_db_dep)):
-    rows = db.execute("SELECT from_month, income, savings_amount FROM budget_history ORDER BY from_month").fetchall()
-    db.close()
-    return [dict(r) for r in rows]
+def budget_history(session=Depends(get_session)):
+    rows = session.query(BudgetHistory).order_by(BudgetHistory.from_month).all()
+    return [{"from_month": r.from_month, "income": r.income, "savings_amount": r.savings_amount} for r in rows]
 
 
 @router.put("/budget")
-def set_budget(data: BudgetSet, db=Depends(get_db_dep)):
+def set_budget(data: BudgetSet, session=Depends(get_session)):
     """Income / savings % valid from `from_month` onward."""
     month = parse_month(data.from_month)[0]
     if data.income < 0 or not 0 <= data.savings_amount <= data.income:
         raise HTTPException(status_code=400, detail="Savings must be between 0 and the salary")
-    db.execute("""INSERT INTO budget_history (from_month, income, savings_amount) VALUES (?,?,?)
-                  ON CONFLICT(user_id, from_month) DO UPDATE SET income=excluded.income, savings_amount=excluded.savings_amount""",
-               (month, round(data.income, 2), round(data.savings_amount, 2)))
-    db.commit()
-    db.close()
+    b = session.query(BudgetHistory).filter(BudgetHistory.from_month == month).first()
+    if b:
+        b.income, b.savings_amount = round(data.income, 2), round(data.savings_amount, 2)
+    else:
+        session.add(BudgetHistory(from_month=month, income=round(data.income, 2), savings_amount=round(data.savings_amount, 2)))
+    session.commit()
     return {"ok": True}
 
 
-def sub_view(db, sid):
+def sub_view(db, session, sid):
     today = current_month()
-    row = db.execute("SELECT * FROM subcategories WHERE id=?", (sid,)).fetchone()
-    if not row:
+    sub = session.get(Subcategory, sid)
+    if not sub:
         raise HTTPException(status_code=404, detail="Sub-category not found")
-    d = dict(row)
+    d = _row_dict(sub)
     d["status"] = subcategory_status(d, today)
     d["has_data"] = bool(db.execute("SELECT 1 FROM expenses WHERE subcategory_id=? LIMIT 1", (sid,)).fetchone())
     return d
 
 
 @router.get("/subcategories")
-def get_subcategories(category_id: int = Query(None), month: str = Query(None), db=Depends(get_db_dep)):
+def get_subcategories(category_id: int = Query(None), month: str = Query(None),
+                       db=Depends(get_db_dep), session=Depends(get_session)):
     """With `month`: those usable/shown in that month. Without: all, with lifecycle status."""
     if month:
         result = subcategories_for_month(db, parse_month(month)[0], category_id)
     else:
-        q = "SELECT id FROM subcategories" + (" WHERE category_id=?" if category_id else "") + " ORDER BY category_id, sort_order, id"
-        ids = [r["id"] for r in db.execute(q, ([category_id] if category_id else []))]
-        result = [sub_view(db, i) for i in ids]
+        q = session.query(Subcategory.id)
+        if category_id:
+            q = q.filter(Subcategory.category_id == category_id)
+        ids = [s.id for s in q.order_by(Subcategory.category_id, Subcategory.sort_order, Subcategory.id).all()]
+        result = [sub_view(db, session, i) for i in ids]
     db.close()
     return result
 
 
 @router.post("/subcategories", status_code=201)
-def create_subcategory(data: SubCreate, db=Depends(get_db_dep)):
+def create_subcategory(data: SubCreate, db=Depends(get_db_dep), session=Depends(get_session)):
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
     start = parse_month(data.start_month)[0]
-    get_category_or_404(db, data.category_id)
-    if db.execute("""SELECT 1 FROM subcategories WHERE category_id=? AND lower(name)=lower(?) AND end_month IS NULL""",
-                  (data.category_id, name)).fetchone():
+    get_category_or_404(session, data.category_id)
+    if session.query(Subcategory).filter(Subcategory.category_id == data.category_id,
+                                          func.lower(Subcategory.name) == name.lower(),
+                                          Subcategory.end_month.is_(None)).first():
         db.close()
         raise HTTPException(status_code=409, detail="This category already has an active sub-category with that name")
-    order = db.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM subcategories WHERE category_id=?", (data.category_id,)).fetchone()[0]
-    cur = db.execute("INSERT INTO subcategories (category_id, name, sort_order, start_month) VALUES (?,?,?,?)",
-                     (data.category_id, name, order, start))
-    db.commit()
-    view = sub_view(db, cur.lastrowid)
+    order = (session.query(func.max(Subcategory.sort_order)).filter(Subcategory.category_id == data.category_id).scalar() or 0) + 1
+    sub = Subcategory(category_id=data.category_id, name=name, sort_order=order, start_month=start)
+    session.add(sub)
+    session.commit()
+    view = sub_view(db, session, sub.id)
     db.close()
     return view
 
 
 @router.put("/subcategories/reorder")
-def reorder_subcategories(data: ReorderRequest, db=Depends(get_db_dep)):
+def reorder_subcategories(data: ReorderRequest, session=Depends(get_session)):
     for i, sid in enumerate(data.ids, start=1):
-        db.execute("UPDATE subcategories SET sort_order=? WHERE id=?", (i, sid))
-    db.commit()
-    db.close()
+        session.query(Subcategory).filter(Subcategory.id == sid).update({"sort_order": i}, synchronize_session=False)
+    session.commit()
     return {"ok": True}
 
 
@@ -406,10 +411,10 @@ def subcategory_review(db=Depends(get_db_dep)):
 
 
 @router.post("/subcategories/review/map")
-def subcategory_review_map(data: ReviewMap, db=Depends(get_db_dep)):
+def subcategory_review_map(data: ReviewMap, db=Depends(get_db_dep), session=Depends(get_session)):
     """Assign a sub-category to every unmapped entry with this note, and remember the note as a rule."""
-    sub = db.execute("SELECT * FROM subcategories WHERE id=?", (data.subcategory_id,)).fetchone()
-    if not sub or sub["category_id"] != data.category_id:
+    sub = session.get(Subcategory, data.subcategory_id)
+    if not sub or sub.category_id != data.category_id:
         db.close()
         raise HTTPException(status_code=400, detail="Sub-category does not belong to this category")
     note = normalize(data.note)
@@ -417,63 +422,66 @@ def subcategory_review_map(data: ReviewMap, db=Depends(get_db_dep)):
                                        (data.category_id,)).fetchall() if normalize(r["note"]) == note]
     for eid in ids:
         db.execute("UPDATE expenses SET subcategory_id=? WHERE id=?", (data.subcategory_id, eid))
-    if note and not db.execute("SELECT 1 FROM subcategory_rules WHERE category_id=? AND pattern=? AND match_type='exact'",
-                               (data.category_id, note)).fetchone():
-        db.execute("INSERT INTO subcategory_rules (category_id, pattern, match_type, subcategory_id) VALUES (?,?, 'exact', ?)",
-                   (data.category_id, note, data.subcategory_id))
     db.commit()
+    if note and not session.query(SubcategoryRule).filter(SubcategoryRule.category_id == data.category_id,
+                                                           SubcategoryRule.pattern == note,
+                                                           SubcategoryRule.match_type == "exact").first():
+        session.add(SubcategoryRule(category_id=data.category_id, pattern=note, match_type="exact",
+                                     subcategory_id=data.subcategory_id))
+        session.commit()
     db.close()
     return {"updated": len(ids)}
 
 
 @router.put("/subcategories/{sid}")
-def update_subcategory(sid: int, data: SubUpdate, db=Depends(get_db_dep)):
+def update_subcategory(sid: int, data: SubUpdate, db=Depends(get_db_dep), session=Depends(get_session)):
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
-    sub_view(db, sid)
-    db.execute("UPDATE subcategories SET name=? WHERE id=?", (name, sid))
-    db.commit()
-    view = sub_view(db, sid)
+    sub_view(db, session, sid)
+    sub = session.get(Subcategory, sid)
+    sub.name = name
+    session.commit()
+    view = sub_view(db, session, sid)
     db.close()
     return view
 
 
 @router.post("/subcategories/{sid}/archive")
-def archive_subcategory(sid: int, data: ArchiveRequest, db=Depends(get_db_dep)):
+def archive_subcategory(sid: int, data: ArchiveRequest, db=Depends(get_db_dep), session=Depends(get_session)):
     from_month = parse_month(data.from_month or next_month(current_month()))[0]
-    sub = sub_view(db, sid)
+    sub = sub_view(db, session, sid)
     if from_month <= sub["start_month"]:
         db.close()
         raise HTTPException(status_code=400, detail="Archive month must be after the month the sub-category starts")
-    db.execute("UPDATE subcategories SET end_month=? WHERE id=?", (prev_month(from_month), sid))
+    session.get(Subcategory, sid).end_month = prev_month(from_month)
+    session.commit()
     later = db.execute("SELECT COUNT(DISTINCT substr(date,1,7)) FROM expenses WHERE subcategory_id=? AND substr(date,1,7)>=?",
                        (sid, from_month)).fetchone()[0]
-    db.commit()
-    view = sub_view(db, sid)
+    view = sub_view(db, session, sid)
     db.close()
     return {**view, "months_with_data_after": later}
 
 
 @router.post("/subcategories/{sid}/restore")
-def restore_subcategory(sid: int, db=Depends(get_db_dep)):
-    sub_view(db, sid)
-    db.execute("UPDATE subcategories SET end_month=NULL WHERE id=?", (sid,))
-    db.commit()
-    view = sub_view(db, sid)
+def restore_subcategory(sid: int, db=Depends(get_db_dep), session=Depends(get_session)):
+    sub_view(db, session, sid)
+    session.get(Subcategory, sid).end_month = None
+    session.commit()
+    view = sub_view(db, session, sid)
     db.close()
     return view
 
 
 @router.delete("/subcategories/{sid}")
-def delete_subcategory(sid: int, db=Depends(get_db_dep)):
-    sub_view(db, sid)
+def delete_subcategory(sid: int, db=Depends(get_db_dep), session=Depends(get_session)):
+    sub_view(db, session, sid)
     if db.execute("SELECT 1 FROM expenses WHERE subcategory_id=? LIMIT 1", (sid,)).fetchone():
         db.close()
         raise HTTPException(status_code=409, detail="Sub-category has expenses - archive it instead")
-    db.execute("DELETE FROM subcategory_rules WHERE subcategory_id=?", (sid,))
-    db.execute("DELETE FROM subcategories WHERE id=?", (sid,))
-    db.commit()
+    session.query(SubcategoryRule).filter(SubcategoryRule.subcategory_id == sid).delete(synchronize_session=False)
+    session.query(Subcategory).filter(Subcategory.id == sid).delete(synchronize_session=False)
+    session.commit()
     db.close()
     return {"ok": True}
 
