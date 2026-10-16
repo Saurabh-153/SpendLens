@@ -8,8 +8,9 @@ screen) always win.
 import re
 import sqlite3
 
-from sqlalchemy import case, literal, select
+from sqlalchemy import case, exists, select
 
+from db.base import row_dict
 from db.models import Expense, Subcategory
 
 # category name -> [(sub-category name, [patterns])]; order = display order
@@ -231,21 +232,16 @@ def subcategory_status(sub, today):
     return "active"
 
 
-SUBCATEGORY_COLS = ("id", "category_id", "name", "sort_order", "start_month", "end_month", "user_id")
-
-
 def subcategories_for_month(session, month, category_id=None):
     """Sub-categories to offer/show in a month: inside their [start, end] range, or holding data that month."""
-    has_data = (select(literal(1)).select_from(Expense)
-                .where(Expense.subcategory_id == Subcategory.id, Expense.date.like(f"{month}-%"))
-                .correlate(Subcategory).exists())
+    has_data = exists().where(Expense.subcategory_id == Subcategory.id, Expense.date.like(f"{month}-%"))
     q = select(Subcategory, case((has_data, 1), else_=0).label("month_has_data"))
     if category_id:
         q = q.where(Subcategory.category_id == category_id)
     rows = session.execute(q.order_by(Subcategory.category_id, Subcategory.sort_order, Subcategory.id)).all()
     out = []
     for r in rows:
-        d = {c: getattr(r[0], c) for c in SUBCATEGORY_COLS}
+        d = row_dict(r[0])
         d["month_has_data"] = r.month_has_data
         in_range = d["start_month"] <= month and (d["end_month"] is None or month <= d["end_month"])
         if in_range or d.pop("month_has_data"):

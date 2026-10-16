@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   archiveCategory, archiveSubcategory, createCategory, createSubcategory, deleteCategory, deleteSubcategory, getCategories, getCategoryUsage, getSubcategories,
   reorderCategories, restoreCategory, updateCategory, updateSubcategory,
@@ -23,7 +23,6 @@ export default function Categories() {
   const [expanded, setExpanded] = useState<number | null>(null)
   const [deletingSub, setDeletingSub] = useState<Subcategory | null>(null)
   const [newSubName, setNewSubName] = useState('')
-  const [drafts, setDrafts] = useState<Record<number, string>>({})
 
   const load = useCallback(() => Promise.all([getCategories(), getSubcategories()])
     .then(([c, s]) => { setCats(c); setSubs(s) })
@@ -33,6 +32,12 @@ export default function Categories() {
   const run = async (p: Promise<unknown>, ok?: string) => {
     try { await p; setMsg(ok ? { text: ok } : null); await load() } catch (e) { setMsg({ text: (e as Error).message, error: true }) }
   }
+
+  const subsByCat = useMemo(() => {
+    const m = new Map<number, Subcategory[]>()
+    for (const s of subs) if (s.status !== 'archived') m.set(s.category_id, [...(m.get(s.category_id) ?? []), s])
+    return m
+  }, [subs])
 
   const shown = cats.filter(c => c.status === tab)
   const today = currentMonth()
@@ -67,7 +72,7 @@ export default function Categories() {
       <Card style={{ padding: 0, overflow: 'hidden' }}>
         {shown.length === 0 && <div style={{ padding: 20, color: T.muted, fontSize: 13 }}>No {tab} categories.</div>}
         {shown.map((c, i) => {
-          const catSubs = subs.filter(s => s.category_id === c.id && s.status !== 'archived')
+          const catSubs = subsByCat.get(c.id) ?? []
           const isOpen = expanded === c.id
           return (
             <div key={c.id} style={{ borderTop: i ? `1px solid ${T.hairline}` : undefined }}>
@@ -109,27 +114,7 @@ export default function Categories() {
                 <div style={{ padding: '0 16px 12px 46px' }}>
                   {catSubs.length === 0 && <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 8 }}>No sub-categories yet.</div>}
                   {catSubs.map(s => (
-                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', fontSize: 13 }}>
-                      {(() => {
-                        const draft = drafts[s.id] ?? s.name
-                        const dirty = draft.trim() !== s.name && draft.trim() !== ''
-                        const clear = () => setDrafts(({ [s.id]: _, ...rest }) => rest)
-                        const save = () => { if (!dirty) return; const name = draft.trim(); clear(); run(updateSubcategory(s.id, name), 'Renamed') }
-                        return (
-                          <>
-                            <input value={draft} spellCheck={false}
-                              onChange={e => setDrafts({ ...drafts, [s.id]: e.target.value })}
-                              onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') clear() }}
-                              style={{ flex: 1, background: 'transparent', border: '1px solid transparent', borderRadius: 6, padding: '3px 8px', fontSize: 13, color: T.text, outline: 'none',
-                                borderColor: dirty ? T.accent : undefined }}
-                              onFocus={e => { e.currentTarget.style.borderColor = T.border }}
-                              onBlur={e => { e.currentTarget.style.borderColor = 'transparent' }} />
-                            <button style={{ ...smallBtn, opacity: dirty ? 1 : 0.4 }} disabled={!dirty} title="Save" aria-label="Save name" onClick={save}>✓</button>
-                            <button style={dangerBtn} title="Delete" aria-label="Delete sub-category" onClick={() => setDeletingSub(s)}>🗑</button>
-                          </>
-                        )
-                      })()}
-                    </div>
+                    <SubRow key={`${s.id}:${s.name}`} sub={s} onSave={name => run(updateSubcategory(s.id, name), 'Renamed')} onDelete={() => setDeletingSub(s)} />
                   ))}
                   <form style={{ display: 'flex', gap: 8, marginTop: 8 }}
                     onSubmit={e => {
@@ -189,7 +174,9 @@ export default function Categories() {
                 <button style={btn()} onClick={() => setDeletingSub(null)}>Cancel</button>
                 <button style={btn(true)} onClick={() => {
                   const s = deletingSub; setDeletingSub(null)
-                  run(archiveSubcategory(s.id, shiftMonth(currentMonth(), 1)), `${s.name} archived from next month`)
+                  const next = shiftMonth(currentMonth(), 1)
+                  const month = next > s.start_month ? next : shiftMonth(s.start_month, 1)
+                  run(archiveSubcategory(s.id, month), `${s.name} archived from ${monthLabel(month)}`)
                 }}>Archive instead</button>
               </div>
             </>
@@ -207,6 +194,25 @@ export default function Categories() {
           )}
         </Modal>
       )}
+    </div>
+  )
+}
+
+function SubRow({ sub, onSave, onDelete }: { sub: Subcategory; onSave: (name: string) => void; onDelete: () => void }) {
+  const [draft, setDraft] = useState(sub.name)
+  const dirty = draft.trim() !== sub.name && draft.trim() !== ''
+  const save = () => { if (dirty) onSave(draft.trim()) }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', fontSize: 13 }}>
+      <input value={draft} spellCheck={false}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setDraft(sub.name) }}
+        style={{ flex: 1, background: 'transparent', border: '1px solid transparent', borderRadius: 6, padding: '3px 8px', fontSize: 13, color: T.text, outline: 'none',
+          borderColor: dirty ? T.accent : undefined }}
+        onFocus={e => { e.currentTarget.style.borderColor = T.border }}
+        onBlur={e => { e.currentTarget.style.borderColor = 'transparent' }} />
+      <button style={{ ...smallBtn, opacity: dirty ? 1 : 0.4 }} disabled={!dirty} title="Save" aria-label="Save name" onClick={save}>✓</button>
+      <button style={dangerBtn} title="Delete" aria-label="Delete sub-category" onClick={onDelete}>🗑</button>
     </div>
   )
 }

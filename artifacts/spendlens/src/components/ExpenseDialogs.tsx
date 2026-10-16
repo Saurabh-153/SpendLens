@@ -31,7 +31,8 @@ export function CellEditor({ category, day, month, entries, subs, subId, onClose
       ? entries.map(e => ({ id: e.id, subcategory_id: e.subcategory_id, amount: String(e.amount), note: e.note }))
       : [{ id: null, subcategory_id: subId ?? null, amount: '', note: '' }],
   )
-  const subName = subId === undefined ? '' : subId === null ? 'Unassigned' : subs.find(s => s.id === subId)?.name ?? ''
+  const isSubCell = subId !== undefined
+  const subName = !isSubCell ? '' : subId === null ? 'Unassigned' : subs.find(s => s.id === subId)?.name ?? ''
   const patch = (i: number, p: Partial<Line>) => setLines(ls => ls.map((l, j) => (j === i ? { ...l, ...p } : l)))
   const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
   const [y, m] = month.split('-').map(Number)
@@ -45,9 +46,9 @@ export function CellEditor({ category, day, month, entries, subs, subId, onClose
         {lines.map((l, i) => (
           <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 96px 28px', gap: 8, marginBottom: 8, alignItems: 'start' }}>
             <div>
-              {subId === undefined && <SubSelect value={l.subcategory_id} onChange={v => patch(i, { subcategory_id: v })}
+              {!isSubCell && <SubSelect value={l.subcategory_id} onChange={v => patch(i, { subcategory_id: v })}
                 options={subsFor(subs, category.id, [l.subcategory_id])} />}
-              <input style={{ ...input, marginTop: subId === undefined ? 6 : 0, fontSize: 12 }} placeholder="Note (optional)" value={l.note}
+              <input style={{ ...input, marginTop: isSubCell ? 0 : 6, fontSize: 12 }} placeholder="Note (optional)" value={l.note}
                 onChange={e => patch(i, { note: e.target.value })} />
             </div>
             <input style={input} type="number" step="any" placeholder="₹" autoFocus={i === 0} value={l.amount}
@@ -58,7 +59,7 @@ export function CellEditor({ category, day, month, entries, subs, subId, onClose
         ))}
         <button type="button" style={{ ...btn(), fontSize: 12, padding: '5px 10px', marginBottom: 14 }}
           onClick={() => setLines(ls => [...ls, { id: null, subcategory_id: subId ?? null, amount: '', note: '' }])}>+ Add line</button>
-        {subId === undefined && (
+        {!isSubCell && (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
             <span style={{ ...label }}>Day total</span>
             <b>{total < 0 ? '-' : ''}{fmtFull(total)}</b>

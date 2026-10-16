@@ -3,8 +3,9 @@ import os
 import shutil
 from datetime import date, datetime
 
-from sqlalchemy import case, func, literal, select
+from sqlalchemy import case, exists, func, select
 
+from db.base import row_dict
 from db.models import BudgetHistory, Category, CategoryTarget, Expense
 
 # SPENDLENS_DB points the whole app at another file. Used by the test suite so it never
@@ -41,9 +42,6 @@ def next_month(m):
     return f"{y}-{mo:02d}"
 
 
-CATEGORY_COLS = ("id", "name", "icon", "color", "target_pct", "hint", "visible", "sort_order", "start_month", "end_month", "user_id")
-
-
 def categories_for_month(session, month):
     """Categories to show in a month, with the target valid for that month.
 
@@ -54,15 +52,13 @@ def categories_for_month(session, month):
     target = (select(CategoryTarget.target_pct)
               .where(CategoryTarget.category_id == Category.id, CategoryTarget.from_month <= month)
               .order_by(CategoryTarget.from_month.desc()).limit(1).correlate(Category).scalar_subquery())
-    has_data = (select(literal(1)).select_from(Expense)
-                .where(Expense.category_id == Category.id, Expense.date.like(f"{month}-%"))
-                .correlate(Category).exists())
+    has_data = exists().where(Expense.category_id == Category.id, Expense.date.like(f"{month}-%"))
     rows = session.execute(
         select(Category, func.coalesce(target, 0).label("month_target"), case((has_data, 1), else_=0).label("month_has_data"))
         .order_by(Category.sort_order, Category.id)).all()
     out = []
     for r in rows:
-        d = {c: getattr(r[0], c) for c in CATEGORY_COLS}
+        d = row_dict(r[0])
         d["month_target"], d["month_has_data"] = r.month_target, r.month_has_data
         in_range = d["start_month"] <= month and (d["end_month"] is None or month <= d["end_month"])
         if in_range or d.pop("month_has_data"):
@@ -80,6 +76,18 @@ def budget_for_month(session, month):
         row = q.order_by(BudgetHistory.from_month).first()
     return {"income": row.income, "savings_amount": row.savings_amount,
             "budget_cap": row.income - row.savings_amount}
+
+
+def budget_caps_for_months(session, months):
+    """{month: budget cap} for several months from one read; same resolution as budget_for_month
+    (latest row at or before the month, else the earliest row)."""
+    rows = session.query(BudgetHistory.from_month, BudgetHistory.income, BudgetHistory.savings_amount) \
+        .order_by(BudgetHistory.from_month).all()
+    caps = {}
+    for m in months:
+        row = next((r for r in reversed(rows) if r.from_month <= m), rows[0])
+        caps[m] = row.income - row.savings_amount
+    return caps
 
 
 def category_allowed_in_month(session, category_id, month):

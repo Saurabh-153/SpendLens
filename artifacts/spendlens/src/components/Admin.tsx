@@ -31,6 +31,8 @@ const ADMIN_TOOLS: AdminTool[] = [
   { group: 'General', id: 'heroes', label: 'Heroes', icon: '🦸', component: Heroes },
 ]
 
+const MENU_TOOLS = ADMIN_TOOLS.filter(t => !t.hidden)
+
 export default function Admin() {
   const [toolId, setToolId] = useState(() => {
     const t = new URLSearchParams(location.search).get('tool')
@@ -38,7 +40,7 @@ export default function Admin() {
   })
   const tool = ADMIN_TOOLS.find(t => t.id === toolId) ?? ADMIN_TOOLS[0]
   const Tool = tool.component
-  const groups = [...new Set(ADMIN_TOOLS.filter(t => !t.hidden).map(t => t.group))]
+  const groups = [...new Set(MENU_TOOLS.map(t => t.group))]
 
   const select = (id: string) => {
     setToolId(id)
@@ -56,7 +58,7 @@ export default function Admin() {
             <div style={{ ...label, padding: '0 10px 8px', display: 'flex', alignItems: 'center', gap: 7 }}>
               <span style={{ width: 7, height: 7, borderRadius: 2, background: GROUP_COLOR[g] ?? T.accent }} />{g}
             </div>
-            {ADMIN_TOOLS.filter(t => t.group === g && !t.hidden).map(t => (
+            {MENU_TOOLS.filter(t => t.group === g).map(t => (
               <button key={t.id} onClick={() => select(t.id)} style={{
                 display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '8px 10px', marginBottom: 3, borderRadius: 8,
                 border: 'none', cursor: 'pointer', fontSize: 13.5, fontWeight: 500,

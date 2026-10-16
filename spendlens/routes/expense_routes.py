@@ -10,7 +10,7 @@ import portfolio as pf
 import prices as px
 import ledger as led
 from subcategories import (normalize, sub_allowed, subcategories_for_month, subcategory_status)
-from database import (budget_for_month, categories_for_month, category_allowed_in_month,
+from database import (budget_caps_for_months, budget_for_month, categories_for_month, category_allowed_in_month,
                       current_month, next_month, prev_month)
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -169,24 +169,31 @@ def has_expenses(session, **where):
     return q.first() is not None
 
 
-def months_with_expenses_from(session, from_month, **where):
-    """How many distinct months at or after `from_month` hold a matching expense."""
+def months_with_expenses_from(session, from_month=None, **where):
+    """How many distinct months (at or after `from_month`, if given) hold a matching expense."""
     ym = func.substr(Expense.date, 1, 7)
-    q = session.query(func.count(func.distinct(ym))).filter(ym >= from_month)
+    q = session.query(func.count(func.distinct(ym)))
+    if from_month is not None:
+        q = q.filter(ym >= from_month)
     for col, val in where.items():
         q = q.filter(getattr(Expense, col) == val)
     return q.scalar()
 
 
+def _category_dict(cat, today, target_pct, has_data):
+    row = _row_dict(cat)
+    row["target_pct"] = target_pct
+    row["status"] = category_status(row, today)
+    row["has_data"] = has_data
+    return row
+
+
 def category_view(session, cid):
     today = current_month()
-    row = _row_dict(get_category_or_404(session, cid))
+    cat = get_category_or_404(session, cid)
     t = session.query(CategoryTarget).filter(CategoryTarget.category_id == cid, CategoryTarget.from_month <= today) \
         .order_by(CategoryTarget.from_month.desc()).first()
-    row["target_pct"] = t.target_pct if t else 0
-    row["status"] = category_status(row, today)
-    row["has_data"] = has_expenses(session, category_id=cid)
-    return row
+    return _category_dict(cat, today, t.target_pct if t else 0, has_expenses(session, category_id=cid))
 
 
 @router.get("/categories")
@@ -194,8 +201,13 @@ def get_categories(month: str = Query(None), session=Depends(get_session)):
     """Without `month`: every category with its lifecycle status. With `month`: those shown in that month."""
     if month:
         return categories_for_month(session, parse_month(month)[0])
-    ids = [c.id for c in session.query(Category.id).order_by(Category.sort_order, Category.id).all()]
-    return [category_view(session, i) for i in ids]
+    today = current_month()
+    cats = session.query(Category).order_by(Category.sort_order, Category.id).all()
+    # ascending, so the last row written per category is its latest target as of today
+    targets = {t.category_id: t.target_pct for t in session.query(CategoryTarget)
+               .filter(CategoryTarget.from_month <= today).order_by(CategoryTarget.from_month)}
+    used = {r[0] for r in session.query(Expense.category_id).distinct()}
+    return [_category_dict(c, today, targets.get(c.id, 0), c.id in used) for c in cats]
 
 
 @router.post("/categories", status_code=201)
@@ -265,7 +277,7 @@ def category_usage(cid: int, session=Depends(get_session)):
     n, total, first, last = session.query(
         func.count(Expense.id), func.coalesce(func.sum(Expense.amount), 0), func.min(Expense.date), func.max(Expense.date)
     ).filter(Expense.category_id == cid).one()
-    months = months_with_expenses_from(session, "", category_id=cid)
+    months = months_with_expenses_from(session, category_id=cid)
     subs = session.query(Subcategory).filter(Subcategory.category_id == cid).count()
     targets = session.query(CategoryTarget).filter(CategoryTarget.category_id == cid).count()
     return {"entries": n, "total": round(total, 2), "first": first, "last": last, "months": months,
@@ -334,15 +346,22 @@ def set_budget(data: BudgetSet, session=Depends(get_session)):
     return {"ok": True}
 
 
-def sub_view(session, sid):
-    today = current_month()
+def get_sub_or_404(session, sid):
     sub = session.get(Subcategory, sid)
     if not sub:
         raise HTTPException(status_code=404, detail="Sub-category not found")
+    return sub
+
+
+def _sub_dict(sub, today, has_data):
     d = _row_dict(sub)
     d["status"] = subcategory_status(d, today)
-    d["has_data"] = has_expenses(session, subcategory_id=sid)
+    d["has_data"] = has_data
     return d
+
+
+def sub_view(session, sid):
+    return _sub_dict(get_sub_or_404(session, sid), current_month(), has_expenses(session, subcategory_id=sid))
 
 
 @router.get("/subcategories")
@@ -350,11 +369,13 @@ def get_subcategories(category_id: int = Query(None), month: str = Query(None), 
     """With `month`: those usable/shown in that month. Without: all, with lifecycle status."""
     if month:
         return subcategories_for_month(session, parse_month(month)[0], category_id)
-    q = session.query(Subcategory.id)
+    q = session.query(Subcategory)
     if category_id:
         q = q.filter(Subcategory.category_id == category_id)
-    ids = [s.id for s in q.order_by(Subcategory.category_id, Subcategory.sort_order, Subcategory.id).all()]
-    return [sub_view(session, i) for i in ids]
+    subs = q.order_by(Subcategory.category_id, Subcategory.sort_order, Subcategory.id).all()
+    used = {r[0] for r in session.query(Expense.subcategory_id).filter(Expense.subcategory_id.isnot(None)).distinct()}
+    today = current_month()
+    return [_sub_dict(s, today, s.id in used) for s in subs]
 
 
 @router.post("/subcategories", status_code=201)
@@ -428,9 +449,7 @@ def update_subcategory(sid: int, data: SubUpdate, session=Depends(get_session)):
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
-    sub_view(session, sid)
-    sub = session.get(Subcategory, sid)
-    sub.name = name
+    get_sub_or_404(session, sid).name = name
     session.commit()
     return sub_view(session, sid)
 
@@ -438,10 +457,10 @@ def update_subcategory(sid: int, data: SubUpdate, session=Depends(get_session)):
 @router.post("/subcategories/{sid}/archive")
 def archive_subcategory(sid: int, data: ArchiveRequest, session=Depends(get_session)):
     from_month = parse_month(data.from_month or next_month(current_month()))[0]
-    sub = sub_view(session, sid)
-    if from_month <= sub["start_month"]:
+    sub = get_sub_or_404(session, sid)
+    if from_month <= sub.start_month:
         raise HTTPException(status_code=400, detail="Archive month must be after the month the sub-category starts")
-    session.get(Subcategory, sid).end_month = prev_month(from_month)
+    sub.end_month = prev_month(from_month)
     session.commit()
     later = months_with_expenses_from(session, from_month, subcategory_id=sid)
     return {**sub_view(session, sid), "months_with_data_after": later}
@@ -449,15 +468,14 @@ def archive_subcategory(sid: int, data: ArchiveRequest, session=Depends(get_sess
 
 @router.post("/subcategories/{sid}/restore")
 def restore_subcategory(sid: int, session=Depends(get_session)):
-    sub_view(session, sid)
-    session.get(Subcategory, sid).end_month = None
+    get_sub_or_404(session, sid).end_month = None
     session.commit()
     return sub_view(session, sid)
 
 
 @router.delete("/subcategories/{sid}")
 def delete_subcategory(sid: int, session=Depends(get_session)):
-    sub_view(session, sid)
+    get_sub_or_404(session, sid)
     if has_expenses(session, subcategory_id=sid):
         raise HTTPException(status_code=409, detail="Sub-category has expenses - archive it instead")
     session.query(SubcategoryRule).filter(SubcategoryRule.subcategory_id == sid).delete(synchronize_session=False)
@@ -466,13 +484,10 @@ def delete_subcategory(sid: int, session=Depends(get_session)):
     return {"ok": True}
 
 
-EXPENSE_COLS = ("id", "category_id", "user_id", "date", "amount", "note", "cashback", "created_at", "subcategory_id")
-
-
 def expense_out(row):
-    """An expense joined to its category, as the API has always returned it (expense columns, then the category's)."""
+    """An expense joined to its category: the expense's columns, then the category's name, icon and colour."""
     e, cat_name, icon, color = row
-    return {**{c: getattr(e, c) for c in EXPENSE_COLS}, "cat_name": cat_name, "icon": icon, "color": color}
+    return {**_row_dict(e), "cat_name": cat_name, "icon": icon, "color": color}
 
 
 def expense_with_category(session, eid):
@@ -718,7 +733,8 @@ def get_dashboard(month: str = Query(None), session=Depends(get_session)):
     ym = func.substr(Expense.date, 1, 7)
     sums = {r.ym: r.total for r in session.query(ym.label("ym"), func.sum(Expense.amount).label("total"))
             .filter(ym.between(months[0], months[-1])).group_by(ym).all()}
-    trend = [{"month": mm, "total": round(sums.get(mm, 0)), "budget_cap": round(budget_for_month(session, mm)["budget_cap"])} for mm in months]
+    caps = budget_caps_for_months(session, months)
+    trend = [{"month": mm, "total": round(sums.get(mm, 0)), "budget_cap": round(caps[mm])} for mm in months]
 
     prev = months[-2]
     prev_rows = session.query(Expense.category_id, Expense.date, Expense.amount).filter(Expense.date.like(f"{prev}-%")).all()
