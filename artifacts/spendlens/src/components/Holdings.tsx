@@ -165,7 +165,7 @@ export default function Holdings() {
           <thead>
             <tr>
               {cols.map(c => (
-                <th key={c.key} style={{ ...thStyle, textAlign: c.align }}>
+                <th key={c.key} style={{ ...thStyle, textAlign: c.align || 'right' }}>
                   {c.heads.map(hd => (
                     <span key={hd.label} title={hd.title} onClick={hd.sort ? () => setSortKey(hd.sort!) : undefined}
                       style={{ display: 'block', cursor: hd.sort ? 'pointer' : undefined, color: hd.sort && sort.key === hd.sort ? T.text : T.muted }}>{hd.label}{arrow(hd.sort)}</span>
