@@ -3,6 +3,7 @@ const API_BASE = '/spendlens/api'
 async function req<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method,
+    cache: 'no-store',
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   })

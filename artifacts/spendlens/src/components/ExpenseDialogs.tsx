@@ -20,16 +20,18 @@ function SubSelect({ value, options, onChange, none = '— no sub-category —' 
 interface Line { id: number | null; subcategory_id: number | null; amount: string; note: string }
 
 /** Edit every entry of one category/day: sub-category + amount + note per line. */
-export function CellEditor({ category, day, month, entries, subs, onClose, onSave }: {
+export function CellEditor({ category, day, month, entries, subs, subId, onClose, onSave }: {
   category: GridCategory; day: number; month: string; entries: GridEntry[]; subs: Subcategory[]
+  subId?: number | null   // set when opened from a sub-category row: only that sub-category's lines are shown
   onClose: () => void
   onSave: (lines: { id: number | null; subcategory_id: number | null; amount: number; note: string }[]) => void
 }) {
   const [lines, setLines] = useState<Line[]>(
     entries.length
       ? entries.map(e => ({ id: e.id, subcategory_id: e.subcategory_id, amount: String(e.amount), note: e.note }))
-      : [{ id: null, subcategory_id: null, amount: '', note: '' }],
+      : [{ id: null, subcategory_id: subId ?? null, amount: '', note: '' }],
   )
+  const subName = subId === undefined ? '' : subId === null ? 'Unassigned' : subs.find(s => s.id === subId)?.name ?? ''
   const patch = (i: number, p: Partial<Line>) => setLines(ls => ls.map((l, j) => (j === i ? { ...l, ...p } : l)))
   const total = lines.reduce((s, l) => s + (parseFloat(l.amount) || 0), 0)
   const [y, m] = month.split('-').map(Number)
@@ -38,28 +40,30 @@ export function CellEditor({ category, day, month, entries, subs, onClose, onSav
     .map(l => ({ id: l.id, subcategory_id: l.subcategory_id, amount: parseFloat(l.amount), note: l.note })))
 
   return (
-    <Modal title={`${category.icon} ${category.name} · ${day} ${MONTHS[m - 1]} ${y}`} onClose={onClose}>
+    <Modal title={`${category.icon} ${category.name}${subName ? ` › ${subName}` : ''} · ${day} ${MONTHS[m - 1]} ${y}`} onClose={onClose}>
       <form onSubmit={e => { e.preventDefault(); submit() }}>
         {lines.map((l, i) => (
           <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 96px 28px', gap: 8, marginBottom: 8, alignItems: 'start' }}>
             <div>
-              <SubSelect value={l.subcategory_id} onChange={v => patch(i, { subcategory_id: v })}
-                options={subsFor(subs, category.id, [l.subcategory_id])} />
-              <input style={{ ...input, marginTop: 6, fontSize: 12 }} placeholder="Note (optional)" value={l.note}
+              {subId === undefined && <SubSelect value={l.subcategory_id} onChange={v => patch(i, { subcategory_id: v })}
+                options={subsFor(subs, category.id, [l.subcategory_id])} />}
+              <input style={{ ...input, marginTop: subId === undefined ? 6 : 0, fontSize: 12 }} placeholder="Note (optional)" value={l.note}
                 onChange={e => patch(i, { note: e.target.value })} />
             </div>
             <input style={input} type="number" step="any" placeholder="₹" autoFocus={i === 0} value={l.amount}
               onChange={e => patch(i, { amount: e.target.value })} />
             <button type="button" title="Remove line" style={{ ...btn(), padding: '6px 0', color: T.danger }}
-              onClick={() => setLines(ls => (ls.length > 1 ? ls.filter((_, j) => j !== i) : [{ id: null, subcategory_id: null, amount: '', note: '' }]))}>×</button>
+              onClick={() => setLines(ls => (ls.length > 1 ? ls.filter((_, j) => j !== i) : [{ id: null, subcategory_id: subId ?? null, amount: '', note: '' }]))}>×</button>
           </div>
         ))}
         <button type="button" style={{ ...btn(), fontSize: 12, padding: '5px 10px', marginBottom: 14 }}
-          onClick={() => setLines(ls => [...ls, { id: null, subcategory_id: null, amount: '', note: '' }])}>+ Add line</button>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
-          <span style={{ ...label }}>Day total</span>
-          <b>{total < 0 ? '-' : ''}{fmtFull(total)}</b>
-        </div>
+          onClick={() => setLines(ls => [...ls, { id: null, subcategory_id: subId ?? null, amount: '', note: '' }])}>+ Add line</button>
+        {subId === undefined && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, fontSize: 13 }}>
+            <span style={{ ...label }}>Day total</span>
+            <b>{total < 0 ? '-' : ''}{fmtFull(total)}</b>
+          </div>
+        )}
         <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 12 }}>Lines with no amount are removed; clearing every line empties the cell.</div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <button type="button" style={btn()} onClick={onClose}>Cancel</button>

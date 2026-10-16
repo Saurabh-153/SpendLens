@@ -12,15 +12,15 @@ import CardsAdmin from './admin/CardsAdmin'
 import Appearance from './admin/Appearance'
 import Heroes from './admin/Heroes'
 
-interface AdminTool { group: string; id: string; label: string; icon: string; component: ComponentType }
+interface AdminTool { group: string; id: string; label: string; icon: string; component: ComponentType; hidden?: boolean }
 
 // Each section has a colour that tints its icons and active item.
 const GROUP_COLOR: Record<string, string> = { Expense: '#7c74ff', Portfolio: '#3ecf8e', Cards: '#f5b942', General: '#38bdf8' }
 
 // Add new admin tools here; the menu and deep links (?page=admin&tool=<id>) pick them up.
 const ADMIN_TOOLS: AdminTool[] = [
-  { group: 'Expense', id: 'categories', label: 'Categories', icon: '🗂️', component: Categories },
-  { group: 'Expense', id: 'subcategories', label: 'Sub-categories', icon: '🔖', component: Subcategories },
+  { group: 'Expense', id: 'categories', label: 'Categories & Sub-categories', icon: '🗂️', component: Categories },
+  { group: 'Expense', id: 'subcategories', label: 'Review entries', icon: '🔖', component: Subcategories, hidden: true },   // not in the menu; opened by the Expense page's "need a sub-category" button
   { group: 'Expense', id: 'targets', label: 'Targets & Budget', icon: '🎯', component: Targets },
   { group: 'Portfolio', id: 'holding-groups', label: 'Holding groups', icon: '🧺', component: HoldingGroups },
   { group: 'Portfolio', id: 'holding-columns', label: 'Holdings columns', icon: '🧱', component: HoldingColumns },
@@ -38,7 +38,7 @@ export default function Admin() {
   })
   const tool = ADMIN_TOOLS.find(t => t.id === toolId) ?? ADMIN_TOOLS[0]
   const Tool = tool.component
-  const groups = [...new Set(ADMIN_TOOLS.map(t => t.group))]
+  const groups = [...new Set(ADMIN_TOOLS.filter(t => !t.hidden).map(t => t.group))]
 
   const select = (id: string) => {
     setToolId(id)
@@ -56,7 +56,7 @@ export default function Admin() {
             <div style={{ ...label, padding: '0 10px 8px', display: 'flex', alignItems: 'center', gap: 7 }}>
               <span style={{ width: 7, height: 7, borderRadius: 2, background: GROUP_COLOR[g] ?? T.accent }} />{g}
             </div>
-            {ADMIN_TOOLS.filter(t => t.group === g).map(t => (
+            {ADMIN_TOOLS.filter(t => t.group === g && !t.hidden).map(t => (
               <button key={t.id} onClick={() => select(t.id)} style={{
                 display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left', padding: '8px 10px', marginBottom: 3, borderRadius: 8,
                 border: 'none', cursor: 'pointer', fontSize: 13.5, fontWeight: 500,
