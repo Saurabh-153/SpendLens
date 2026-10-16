@@ -1,7 +1,7 @@
 """Expense domain: categories, their monthly targets, budget history, expenses, subcategories
 and the auto-categorisation rules. Mirrors the tables database.py created by hand.
 """
-from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy import ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -56,7 +56,7 @@ class Expense(Base):
     amount: Mapped[float]
     note: Mapped[str] = mapped_column(default="")
     cashback: Mapped[float] = mapped_column(default=0)
-    created_at: Mapped[str] = mapped_column(default="")
+    created_at: Mapped[str] = mapped_column(server_default=text("(datetime('now'))"))
     subcategory_id: Mapped[int] = mapped_column(ForeignKey("subcategories.id"), nullable=True)
 
 

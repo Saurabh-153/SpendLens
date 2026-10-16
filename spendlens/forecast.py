@@ -11,7 +11,10 @@ import calendar
 import math
 from datetime import date
 
+from sqlalchemy import func
+
 from database import budget_for_month, categories_for_month
+from db.models import Expense
 
 WINDOW = 6          # months of history behind an estimate
 MIN_HISTORY = 3     # months needed before we forecast at all
@@ -31,14 +34,13 @@ def _median(vals):
     return _pct(vals, 0.5)
 
 
-def _history(db, before):
+def _history(session, before):
     """{month: {category_id: total}} for months < `before` that hold any spend."""
     hist = {}
-    for r in db.execute(
-        "SELECT substr(date,1,7) AS ym, category_id, SUM(amount) AS t FROM expenses "
-        "WHERE substr(date,1,7) < ? GROUP BY ym, category_id", (before,)
-    ).fetchall():
-        hist.setdefault(r["ym"], {})[r["category_id"]] = r["t"]
+    ym = func.substr(Expense.date, 1, 7)
+    for r in session.query(ym.label("ym"), Expense.category_id, func.sum(Expense.amount).label("total")) \
+            .filter(ym < before).group_by(ym, Expense.category_id).all():
+        hist.setdefault(r.ym, {})[r.category_id] = r.total
     return {m: c for m, c in hist.items() if sum(c.values()) > 0}
 
 
@@ -93,7 +95,7 @@ def _backtest(hist, cids):
     return per_cat, summary
 
 
-def build_forecast(db, month, today=None):
+def build_forecast(session, month, today=None):
     """Forecast for `month`, using only data from earlier months plus month-to-date spend."""
     today = today or date.today()
     days = calendar.monthrange(int(month[:4]), int(month[5:]))[1]
@@ -105,20 +107,20 @@ def build_forecast(db, month, today=None):
     else:
         elapsed, mode = days, "past"
 
-    hist = _history(db, month)
+    hist = _history(session, month)
     months = sorted(hist)
-    budget = budget_for_month(db, month)
+    budget = budget_for_month(session, month)
     base = {"month": month, "mode": mode, "elapsed": elapsed, "days": days, "budget_cap": round(budget["budget_cap"]),
             "history_months": len(months)}
     if len(months) < MIN_HISTORY:
         return {**base, "available": False, "reason": f"Needs at least {MIN_HISTORY} months of earlier data"}
 
-    cats = categories_for_month(db, month)
+    cats = categories_for_month(session, month)
     cids = [c["id"] for c in cats]
     per_cat, summary = _backtest(hist, cids)
 
-    spent_now = {r["category_id"]: r["t"] for r in db.execute(
-        "SELECT category_id, SUM(amount) AS t FROM expenses WHERE date LIKE ? GROUP BY category_id", (f"{month}-%",)).fetchall()}
+    spent_now = {r.category_id: r.total for r in session.query(Expense.category_id, func.sum(Expense.amount).label("total"))
+                 .filter(Expense.date.like(f"{month}-%")).group_by(Expense.category_id).all()}
 
     w = elapsed / days if mode == "in_progress" else 0.0
     out, sq_lo, sq_hi, total = [], 0.0, 0.0, 0.0

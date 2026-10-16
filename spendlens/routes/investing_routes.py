@@ -490,7 +490,7 @@ def portfolio_kpis(db=Depends(get_db_dep), session=Depends(get_session)):
         goals = [_row_dict(g) for g in session.query(PortfolioGoal).order_by(PortfolioGoal.target_year, PortfolioGoal.id).all()]
         sim, extra = pf.projection(groups, goals, plan["assumptions"], today)
         sip_total = sum(h.get("sip_amount") or 0 for h in held)
-        income = budget_for_month(db, current_month())["income"]
+        income = budget_for_month(session, current_month())["income"]
         spend = pf.monthly_spend(db, today)
         em = groups.get(pf.EMERGENCY, {}).get("present", 0)
         locked = sum(h["present"] for h in held if h["asset_type"] == "PF")

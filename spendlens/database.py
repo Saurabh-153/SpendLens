@@ -3,13 +3,18 @@ import os
 import shutil
 from datetime import date, datetime
 
+from sqlalchemy import case, func, literal, select
+
+from db.models import BudgetHistory, Category, CategoryTarget, Expense
+
 # SPENDLENS_DB points the whole app at another file. Used by the test suite so it never
 # touches your real data; leave it unset for normal use.
 DB_PATH = os.environ.get("SPENDLENS_DB") or os.path.join(os.path.dirname(__file__), "spendlens_v2.db")
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # FastAPI may open (dependency setup) and close (teardown) a request's connection on different pool threads.
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -36,22 +41,29 @@ def next_month(m):
     return f"{y}-{mo:02d}"
 
 
-def categories_for_month(db, month):
+CATEGORY_COLS = ("id", "name", "icon", "color", "target_pct", "hint", "visible", "sort_order", "start_month", "end_month", "user_id")
+
+
+def categories_for_month(session, month):
     """Categories to show in a month, with the target valid for that month.
 
     A category is shown if the month is inside [start_month, end_month] OR it has
     expenses in that month, so recorded data is never hidden. `archived` marks a
     category shown only because of its data.
     """
-    rows = db.execute("""
-        SELECT c.*,
-          COALESCE((SELECT t.target_pct FROM category_targets t
-                    WHERE t.category_id=c.id AND t.from_month<=? ORDER BY t.from_month DESC LIMIT 1), 0) AS month_target,
-          EXISTS(SELECT 1 FROM expenses e WHERE e.category_id=c.id AND e.date LIKE ?) AS month_has_data
-        FROM categories c ORDER BY c.sort_order, c.id""", (month, f"{month}-%")).fetchall()
+    target = (select(CategoryTarget.target_pct)
+              .where(CategoryTarget.category_id == Category.id, CategoryTarget.from_month <= month)
+              .order_by(CategoryTarget.from_month.desc()).limit(1).correlate(Category).scalar_subquery())
+    has_data = (select(literal(1)).select_from(Expense)
+                .where(Expense.category_id == Category.id, Expense.date.like(f"{month}-%"))
+                .correlate(Category).exists())
+    rows = session.execute(
+        select(Category, func.coalesce(target, 0).label("month_target"), case((has_data, 1), else_=0).label("month_has_data"))
+        .order_by(Category.sort_order, Category.id)).all()
     out = []
     for r in rows:
-        d = dict(r)
+        d = {c: getattr(r[0], c) for c in CATEGORY_COLS}
+        d["month_target"], d["month_has_data"] = r.month_target, r.month_has_data
         in_range = d["start_month"] <= month and (d["end_month"] is None or month <= d["end_month"])
         if in_range or d.pop("month_has_data"):
             d["target_pct"] = d.pop("month_target")
@@ -60,18 +72,18 @@ def categories_for_month(db, month):
     return out
 
 
-def budget_for_month(db, month):
+def budget_for_month(session, month):
     """Salary and savings (both in rupees) valid for a month; budget cap = salary - savings."""
-    row = db.execute("""SELECT income, savings_amount FROM budget_history
-                        WHERE from_month<=? ORDER BY from_month DESC LIMIT 1""", (month,)).fetchone()
+    q = session.query(BudgetHistory.income, BudgetHistory.savings_amount)
+    row = q.filter(BudgetHistory.from_month <= month).order_by(BudgetHistory.from_month.desc()).first()
     if row is None:
-        row = db.execute("SELECT income, savings_amount FROM budget_history ORDER BY from_month LIMIT 1").fetchone()
-    return {"income": row["income"], "savings_amount": row["savings_amount"],
-            "budget_cap": row["income"] - row["savings_amount"]}
+        row = q.order_by(BudgetHistory.from_month).first()
+    return {"income": row.income, "savings_amount": row.savings_amount,
+            "budget_cap": row.income - row.savings_amount}
 
 
-def category_allowed_in_month(db, category_id, month):
-    return any(c["id"] == category_id and not c["archived"] for c in categories_for_month(db, month))
+def category_allowed_in_month(session, category_id, month):
+    return any(c["id"] == category_id and not c["archived"] for c in categories_for_month(session, month))
 
 
 def _migrate_holdings(conn):
