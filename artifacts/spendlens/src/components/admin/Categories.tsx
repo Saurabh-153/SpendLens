@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  archiveCategory, createCategory, deleteCategory, getCategories, getCategoryUsage, reorderCategories, restoreCategory, updateCategory,
-  type Category, type CategoryUsage,
+  archiveCategory, archiveSubcategory, createCategory, createSubcategory, deleteCategory, deleteSubcategory, getCategories, getCategoryUsage, getSubcategories,
+  reorderCategories, restoreCategory, updateCategory, updateSubcategory,
+  type Category, type CategoryUsage, type Subcategory,
 } from '../../api'
 import { currentMonth, monthLabel, shiftMonth } from '../../months'
 import { T, fmtFull } from '../../theme'
@@ -13,18 +14,30 @@ const EMOJIS = ['🏠', '⚡', '🛒', '🥛', '🍽️', '🚗', '💊', '🎒'
 
 export default function Categories() {
   const [cats, setCats] = useState<Category[]>([])
+  const [subs, setSubs] = useState<Subcategory[]>([])
   const [tab, setTab] = useState<Tab>('active')
   const [msg, setMsg] = useState<{ text: string; error?: boolean } | null>(null)
   const [editing, setEditing] = useState<Category | 'new' | null>(null)
   const [archiving, setArchiving] = useState<Category | null>(null)
   const [deleting, setDeleting] = useState<Category | null>(null)
+  const [expanded, setExpanded] = useState<number | null>(null)
+  const [deletingSub, setDeletingSub] = useState<Subcategory | null>(null)
+  const [newSubName, setNewSubName] = useState('')
 
-  const load = useCallback(() => getCategories().then(setCats).catch(e => setMsg({ text: e.message, error: true })), [])
+  const load = useCallback(() => Promise.all([getCategories(), getSubcategories()])
+    .then(([c, s]) => { setCats(c); setSubs(s) })
+    .catch(e => setMsg({ text: e.message, error: true })), [])
   useEffect(() => { load() }, [load])
 
   const run = async (p: Promise<unknown>, ok?: string) => {
     try { await p; setMsg(ok ? { text: ok } : null); await load() } catch (e) { setMsg({ text: (e as Error).message, error: true }) }
   }
+
+  const subsByCat = useMemo(() => {
+    const m = new Map<number, Subcategory[]>()
+    for (const s of subs) if (s.status !== 'archived') m.set(s.category_id, [...(m.get(s.category_id) ?? []), s])
+    return m
+  }, [subs])
 
   const shown = cats.filter(c => c.status === tab)
   const today = currentMonth()
@@ -42,7 +55,7 @@ export default function Categories() {
 
   return (
     <div>
-      <AdminHeader title="Categories" hint="Archiving hides a category from a month onward. Earlier months keep their amounts."
+      <AdminHeader title="Categories & Sub-categories" hint="Expand a category with ▸ to manage its sub-categories. Archiving hides a category from a month onward; earlier months keep their amounts."
         action={<button style={btn(true)} onClick={() => setEditing('new')}>+ Add category</button>} />
 
       <div style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${T.border}`, marginBottom: 16 }}>
@@ -58,34 +71,67 @@ export default function Categories() {
 
       <Card style={{ padding: 0, overflow: 'hidden' }}>
         {shown.length === 0 && <div style={{ padding: 20, color: T.muted, fontSize: 13 }}>No {tab} categories.</div>}
-        {shown.map((c, i) => (
-          <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px', borderTop: i ? `1px solid ${T.hairline}` : undefined }}>
-            <span style={{ width: 9, height: 9, borderRadius: '50%', background: c.color, flexShrink: 0 }} />
-            <span style={{ fontSize: 18, width: 26 }}>{c.icon}</span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}</div>
-              <div style={{ fontSize: 11.5, color: T.muted, marginTop: 2 }}>
-                {c.start_month > '0000-00' && <>from {monthLabel(c.start_month)} · </>}
-                {c.end_month ? <>last month {monthLabel(c.end_month)}</> : <>no end month</>}
-                {' · '}target {c.target_pct.toFixed(2)}%{c.hint && <> · {c.hint}</>}
+        {shown.map((c, i) => {
+          const catSubs = subsByCat.get(c.id) ?? []
+          const isOpen = expanded === c.id
+          return (
+            <div key={c.id} style={{ borderTop: i ? `1px solid ${T.hairline}` : undefined }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 16px' }}>
+                <button
+                  onClick={() => { setExpanded(isOpen ? null : c.id); setNewSubName('') }}
+                  title={isOpen ? 'Hide sub-categories' : `Sub-categories (${catSubs.length})`}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', display: 'flex', alignItems: 'center', flexShrink: 0,
+                    color: c.color, fontSize: 17, lineHeight: 1, transform: isOpen ? 'rotate(90deg)' : undefined, transition: 'transform .12s',
+                  }}>
+                  ▸
+                </button>
+                <span style={{ fontSize: 18, width: 26 }}>{c.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{c.name}{catSubs.length > 0 && <span style={{ fontWeight: 400, color: T.muted }}> · {catSubs.length} sub-categor{catSubs.length === 1 ? 'y' : 'ies'}</span>}</div>
+                  <div style={{ fontSize: 11.5, color: T.muted, marginTop: 2 }}>
+                    {c.start_month > '0000-00' && <>from {monthLabel(c.start_month)} · </>}
+                    {c.end_month ? <>last month {monthLabel(c.end_month)}</> : <>no end month</>}
+                    {' · '}target {c.target_pct.toFixed(2)}%{c.hint && <> · {c.hint}</>}
+                  </div>
+                </div>
+                {tab === 'active' && !c.end_month && (
+                  <>
+                    <button style={smallBtn} title="Move up" onClick={() => move(c, -1)}>↑</button>
+                    <button style={smallBtn} title="Move down" onClick={() => move(c, 1)}>↓</button>
+                  </>
+                )}
+                <button style={smallBtn} onClick={() => setEditing(c)}>Edit</button>
+                {c.end_month && (c.status === 'archived' || c.end_month >= today) && (
+                  <button style={smallBtn} onClick={() => run(restoreCategory(c.id), `${c.name} restored`)}>Restore</button>
+                )}
+                {!c.end_month && c.status !== 'archived' && (
+                  <button style={smallBtn} onClick={() => setArchiving(c)}>Archive</button>
+                )}
+                <button style={dangerBtn} title="Delete" aria-label="Delete category" onClick={() => setDeleting(c)}>🗑</button>
               </div>
+              {isOpen && (
+                <div style={{ padding: '0 16px 12px 46px' }}>
+                  {catSubs.length === 0 && <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 8 }}>No sub-categories yet.</div>}
+                  {catSubs.map(s => (
+                    <SubRow key={`${s.id}:${s.name}`} sub={s} onSave={name => run(updateSubcategory(s.id, name), 'Renamed')} onDelete={() => setDeletingSub(s)} />
+                  ))}
+                  <form style={{ display: 'flex', gap: 8, marginTop: 8 }}
+                    onSubmit={e => {
+                      e.preventDefault()
+                      if (!newSubName.trim()) return
+                      const name = newSubName.trim()
+                      setNewSubName('')
+                      run(createSubcategory(c.id, name, currentMonth()), 'Sub-category added')
+                    }}>
+                    <input style={{ ...input, flex: 1 }} placeholder="New sub-category name" value={newSubName} onChange={e => setNewSubName(e.target.value)} />
+                    <button type="submit" style={{ ...btn(true), opacity: newSubName.trim() ? 1 : 0.5 }} disabled={!newSubName.trim()}>Add</button>
+                  </form>
+                </div>
+              )}
             </div>
-            {tab === 'active' && !c.end_month && (
-              <>
-                <button style={smallBtn} title="Move up" onClick={() => move(c, -1)}>↑</button>
-                <button style={smallBtn} title="Move down" onClick={() => move(c, 1)}>↓</button>
-              </>
-            )}
-            <button style={smallBtn} onClick={() => setEditing(c)}>Edit</button>
-            {c.end_month && (c.status === 'archived' || c.end_month >= today) && (
-              <button style={smallBtn} onClick={() => run(restoreCategory(c.id), `${c.name} restored`)}>Restore</button>
-            )}
-            {!c.end_month && c.status !== 'archived' && (
-              <button style={smallBtn} onClick={() => setArchiving(c)}>Archive</button>
-            )}
-            <button style={dangerBtn} onClick={() => setDeleting(c)}>Delete</button>
-          </div>
-        ))}
+          )
+        })}
       </Card>
 
       {editing && (
@@ -116,6 +162,57 @@ export default function Categories() {
           onDelete={() => { const id = deleting.id; setDeleting(null); run(deleteCategory(id), 'Category deleted') }}
           onArchive={() => { const c = deleting; setDeleting(null); setArchiving(c) }} />
       )}
+      {deletingSub && (
+        <Modal title={deletingSub.has_data ? `${deletingSub.name} has expenses` : 'Delete sub-category?'} onClose={() => setDeletingSub(null)}>
+          {deletingSub.has_data ? (
+            <>
+              <p style={{ fontSize: 13, color: T.muted, lineHeight: 1.6, marginBottom: 16 }}>
+                <b style={{ color: T.text }}>{deletingSub.name}</b> is used by existing expenses, so it can't be deleted without orphaning them.
+                Archive it instead: it disappears from next month onward and earlier months keep it.
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button style={btn()} onClick={() => setDeletingSub(null)}>Cancel</button>
+                <button style={btn(true)} onClick={() => {
+                  const s = deletingSub; setDeletingSub(null)
+                  const next = shiftMonth(currentMonth(), 1)
+                  const month = next > s.start_month ? next : shiftMonth(s.start_month, 1)
+                  run(archiveSubcategory(s.id, month), `${s.name} archived from ${monthLabel(month)}`)
+                }}>Archive instead</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p style={{ fontSize: 13, color: T.muted, marginBottom: 16 }}>
+                <b style={{ color: T.text }}>{deletingSub.name}</b> has never been used, so it can be removed completely.
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button style={btn()} onClick={() => setDeletingSub(null)}>Cancel</button>
+                <button style={{ ...btn(), background: T.danger, borderColor: T.danger, color: '#fff' }}
+                  onClick={() => { const id = deletingSub.id; setDeletingSub(null); run(deleteSubcategory(id), 'Sub-category deleted') }}>Delete</button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+function SubRow({ sub, onSave, onDelete }: { sub: Subcategory; onSave: (name: string) => void; onDelete: () => void }) {
+  const [draft, setDraft] = useState(sub.name)
+  const dirty = draft.trim() !== sub.name && draft.trim() !== ''
+  const save = () => { if (dirty) onSave(draft.trim()) }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', fontSize: 13 }}>
+      <input value={draft} spellCheck={false}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setDraft(sub.name) }}
+        style={{ flex: 1, background: 'transparent', border: '1px solid transparent', borderRadius: 6, padding: '3px 8px', fontSize: 13, color: T.text, outline: 'none',
+          borderColor: dirty ? T.accent : undefined }}
+        onFocus={e => { e.currentTarget.style.borderColor = T.border }}
+        onBlur={e => { e.currentTarget.style.borderColor = 'transparent' }} />
+      <button style={{ ...smallBtn, opacity: dirty ? 1 : 0.4 }} disabled={!dirty} title="Save" aria-label="Save name" onClick={save}>✓</button>
+      <button style={dangerBtn} title="Delete" aria-label="Delete sub-category" onClick={onDelete}>🗑</button>
     </div>
   )
 }

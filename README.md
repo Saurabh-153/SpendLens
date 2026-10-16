@@ -23,9 +23,11 @@ ExpenseTrack/
 ├── plan/                                             forecasting / ML roadmap (Phase A done, B and C planned)
 ├── package.json                 pnpm workspace scripts (dev, build, typecheck)
 ├── pnpm-workspace.yaml          workspace + esbuild build-script allowance
+├── alembic.ini, alembic/        schema migrations (see "Tests and migrations" below)
 ├── screenshot/                  source Excel sheet used to import holdings
 ├── spendlens/                   BACKEND (Python)
-│   ├── app.py                   FastAPI app: mounts /spendlens/api, serves the built UI, port 5000
+│   ├── app.py                   FastAPI app: mounts /spendlens/api, serves the built UI, port 5000;
+│   │                            runs init_db() then Alembic's upgrade_head() on startup
 │   ├── database.py              SQLite connection, schema, seeding, migrations,
 │   │                            month helpers, categories_for_month, budget_for_month
 │   ├── subcategories.py         sub-category seed, note → sub-category matching rules, migration
@@ -43,9 +45,17 @@ ExpenseTrack/
 │   ├── card_advisor.py          which card for what: best card per spend kind, cost of the wrong one
 │   ├── card_perks.py            card benefits (rewards, milestones, lounge, fees) — seed, read, edit
 │   ├── requirements.txt
+│   ├── db/                      SQLAlchemy layer (coexists with raw sqlite3 above; see "Tests and migrations")
+│   │   ├── engine.py            engine/session, DATABASE_URL (defaults to the same SQLite file)
+│   │   ├── base.py              declarative Base
+│   │   ├── migrate.py           upgrade_head(): runs Alembic programmatically, called from app.py and conftest.py
+│   │   └── models/              Holding, HoldingGroup, HoldingSnapshot, PortfolioSnapshot, PortfolioGoal,
+│   │                            PortfolioPlan, Category, CategoryTarget, BudgetHistory, Expense,
+│   │                            Subcategory, SubcategoryRule, Settings, Card, CardAccount,
+│   │                            CardStatement, CardTxn, CardMerchantRule, CardPerk
 │   ├── routes/
 │   │   ├── api.py               aggregates the three routers below into the one FastAPI includes
-│   │   ├── _common.py           get_db_dep: the per-request SQLite connection (FastAPI Depends)
+│   │   ├── _common.py           get_db_dep (per-request SQLite connection) and row_dict (ORM → dict)
 │   │   ├── expense_routes.py    categories, budget, sub-categories, expenses, dashboard, forecast
 │   │   ├── investing_routes.py  holdings, goals, asset mix, daily prices, transactions, ledger
 │   │   └── card_routes.py       cards, statement import, merchant rules, perks, advice
@@ -119,7 +129,9 @@ flowchart TB
     subgraph BE["BACKEND — FastAPI (spendlens/)"]
         ROUTER["routes/api.py<br/>combines the 3 routers below<br/>into the one app.py includes"]
         DEP["routes/_common.py<br/>get_db_dep: one SQLite<br/>connection per request"]
+        ORM["db/engine.py, db/models/<br/>SQLAlchemy Session, partial cutover<br/>+ Alembic migrations on startup"]
         ROUTER -.-> DEP
+        ROUTER -.-> ORM
 
         subgraph EXP["Expense & budget — routes/expense_routes.py"]
             direction LR
@@ -155,6 +167,7 @@ flowchart TB
     EXP -- "reads/writes" --> DB[("SQLite<br/>spendlens_v2.db")]
     PORT -- "reads/writes" --> DB
     CARD -- "reads/writes" --> DB
+    ORM -- "same file, Postgres-ready" --> DB
 
     PRX -- "NSE closes" --> YF["Yahoo Finance<br/>(unofficial, no key)"]
     PRX -- "NAVAll.txt" --> AMFI["AMFI"]
@@ -166,13 +179,17 @@ flowchart TB
 Reading it top to bottom: the **frontend** is six pages that all go through one typed client
 (`api.ts`); every request lands on `routes/api.py`, which is just three domain routers combined
 — **Expense & budget**, **Portfolio**, **Credit cards** — each its own file, each a handful of
-plain Python modules with one job apiece. Every route gets its database connection the same
-way, from the one `get_db_dep` in `routes/_common.py` (a FastAPI `Depends`, so the connection is
-always closed on the way out, including when a request fails partway through). Every group reads
-and writes the **same single SQLite file**, so there's no second database or cache to keep in
-sync. The only two things that leave your machine are the price refresh (Yahoo Finance, AMFI —
-both free, no key) and, only if you opt in, an unrecognised card statement going to the Anthropic
-API.
+plain Python modules with one job apiece. Most routes get their database connection from
+`get_db_dep` in `routes/_common.py` (a FastAPI `Depends` over raw `sqlite3`, so the connection is
+always closed on the way out, even when a request fails partway through). A growing subset of
+each route file's *own* queries — against a table that now has a SQLAlchemy model in
+`db/models/` — instead go through `get_session` (`db/engine.py`), a second `Depends` over a
+SQLAlchemy `Session`. Both point at the **same single SQLite file**, so there's no second
+database or cache to keep in sync; `app.py` also runs Alembic's migrations on startup
+(`db/migrate.py`), right after the older hand-rolled ones in `database.py`, so a brand-new
+database and the live one always end up in the identical shape. The only two things that leave
+your machine are the price refresh (Yahoo Finance, AMFI — both free, no key) and, only if you opt
+in, an unrecognised card statement going to the Anthropic API.
 
 ## Data model
 
@@ -274,13 +291,45 @@ of `spendlens_v2.db` and are skipped if the file is not there.
   at the reach month, the forecast matches a brute-force loop, no SIP share is ever
   negative, and an unreachable target is reported rather than faked.
 
-**Migrations.** Schema changes are numbered steps in `MIGRATIONS` (`database.py`),
-applied once at start-up and recorded in `schema_migrations`. A timestamped
-`spendlens_v2.pre-vN-<date>.bak` is written before the first pending step runs on a
-database that has data. Version 1 is the baseline: the older "re-check the columns every
-start-up" helpers above it (`_migrate_admin`, `_migrate_holdings`, the sub-category
-migration) still run as before. To add a step, append `(n, "name", fn)` to the list —
-never edit a step that has already shipped.
+**Migrations — two systems, one path.** Schema changes used to be numbered steps in
+`MIGRATIONS` (`database.py`), applied once at start-up and recorded in
+`schema_migrations`. That system still exists and still runs first on every start-up
+(`init_db()`, called from `app.py`) — it's the baseline shape every table starts in,
+including a few (`portfolio_snapshots`, `portfolio_goals`, `transactions`,
+`portfolio_plan`) that are actually created lazily on first use rather than by
+`database.py` itself. **New schema changes go through Alembic instead** (`alembic/`,
+`spendlens/db/models/`): `app.py` runs `init_db()` then
+`spendlens/db/migrate.py`'s `upgrade_head()` immediately after, so every
+database — fresh or live — reaches the exact same final schema through the exact same
+two-step path. `tests/conftest.py`'s `seeded_db` fixture runs the identical sequence, so
+the test suite now exercises real start-up behaviour rather than `database.py`'s
+migrations in isolation.
+
+To add a schema change: write a SQLAlchemy model (or extend one) in
+`spendlens/db/models/`, then from the repo root:
+
+```powershell
+.\venv_expense\Scripts\python -m alembic revision -m "describe the change"
+# edit the generated file in alembic/versions/ — review autogenerate, don't trust it blindly
+.\venv_expense\Scripts\python -m alembic upgrade head
+```
+
+Test the migration on a *scratch copy* of `spendlens_v2.db` first — upgrade, downgrade,
+upgrade again — before ever running it against the real file. A table that's created
+lazily (by `ensure()` in `portfolio.py`/`ledger.py`, not by `database.py`'s own startup
+code) may not exist yet when Alembic runs against a brand-new database; guard an `ALTER`
+against that the way `0a3ec7a2c0e3`'s migration does (check `inspector.get_table_names()`
+and `CREATE` directly in the final shape if the table isn't there yet, instead of only
+ever `ALTER`ing).
+
+**sqlite3 and SQLAlchemy currently coexist.** Most routes still read/write through raw
+`sqlite3` (`routes/_common.py`'s `get_db_dep`); the subset of each route file's *own*
+direct queries against a modeled table (not inside `portfolio.py`/`prices.py`/`sip.py`/
+`ledger.py`/`cards.py`/`card_perks.py`/`card_advisor.py`, which still take the raw
+connection they're built for) goes through a SQLAlchemy `Session`
+(`db/engine.py`'s `get_session`) instead. `Expense`-table writes and the heavier
+multi-table reporting joins (`get_dashboard`, `get_monthly_grid`, `get_expenses`,
+`subcategory_review`) are still raw SQL as of this writing.
 
 ## Cards (credit cards)
 

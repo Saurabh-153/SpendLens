@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { addExpense, getGrid, getReview, setCellEntries, setRange, type GridCategory, type MonthlyGrid } from '../api'
+import { addExpense, getGrid, getReview, setCellEntries, setRange, type GridCategory, type GridEntry, type MonthlyGrid } from '../api'
 import { currentMonth, shiftMonth } from '../months'
 import { T, fmt, fmtFull } from '../theme'
 import { AddDialog, CellEditor } from './ExpenseDialogs'
@@ -28,7 +28,13 @@ function daysLeft(month: string, days: number): number {
   return month < cur ? 0 : days
 }
 
-interface Cell { catId: number; day: number }
+// subId: undefined = the category's own row; a number/null = one of its sub-category rows (null = Unassigned)
+interface Cell { catId: number; day: number; subId?: number | null }
+interface SubRowData { id: number | null; name: string; total: number; perDay: number[] }
+
+const toLine = (e: GridEntry) => ({ id: e.id, subcategory_id: e.subcategory_id, amount: e.amount, note: e.note })
+/** A day's entries that belong to other sub-categories than `subId`, as lines to send back unchanged. */
+const othersOf = (entries: GridEntry[], subId: number | null) => entries.filter(e => e.subcategory_id !== subId).map(toLine)
 
 export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', tool: string, tab?: string) => void }) {
   const [month, setMonth] = useState(currentMonth)
@@ -82,12 +88,22 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
     () => dayNums.map(d => cats.reduce((s, c) => s + (c.days[d]?.amount ?? 0), 0)),
     [cats, dayNums],
   )
+  // Sub-category rows are built once per category per loaded grid, not on every keystroke / arrow-key move.
+  const subRowCache = useMemo(() => new Map<number, SubRowData[]>(), [grid, dayNums])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- saving a cell from the grid (quick typing, Delete key)
-  const saveCell = useCallback((catId: number, day: number, amount: number) => {
+  const saveCell = useCallback((catId: number, day: number, amount: number, subId?: number | null) => {
     const cat = cats.find(c => c.id === catId)
     if (!cat) return
     const entries = cat.days[day]?.entries ?? []
+    if (subId !== undefined) {
+      const mine = entries.filter(e => e.subcategory_id === subId)
+      if (mine.length > 1) { setEditing({ catId, day, subId }); return }
+      const others = othersOf(entries, subId)
+      const line = amount ? [{ id: mine[0]?.id ?? null, subcategory_id: subId, amount, note: mine[0]?.note ?? '' }] : []
+      run(setCellEntries(catId, `${month}-${pad(day)}`, [...others, ...line]))
+      return
+    }
     if (entries.length > 1) { setEditing({ catId, day }); return }   // several lines: use the full editor
     const date = `${month}-${pad(day)}`
     if (!amount) run(setCellEntries(catId, date, []))
@@ -102,10 +118,12 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
     quickRef.current = null
     setQuick(null)
     const value = parseFloat(q.text)
-    const existing = cats.find(c => c.id === q.catId)?.days[q.day]?.amount ?? 0
+    const day = cats.find(c => c.id === q.catId)?.days[q.day]
+    const existing = q.subId === undefined ? day?.amount ?? 0
+      : (day?.entries ?? []).filter(e => e.subcategory_id === q.subId).reduce((t, e) => t + e.amount, 0)
     const next = Number.isFinite(value) ? value : 0
     if (next === existing) return
-    saveCell(q.catId, q.day, next)
+    saveCell(q.catId, q.day, next, q.subId)
   }, [cats, saveCell])
 
   // ---- keyboard: N add, [ ] month, arrows move, digits type, Enter details, Delete clears, Esc deselect
@@ -125,14 +143,14 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
       const move = (dc: number, dd: number) => {
         e.preventDefault()
         const c = k.cats[Math.min(k.cats.length - 1, Math.max(0, idx + dc))]
-        setSel({ catId: c.id, day: Math.min(k.grid!.days, Math.max(1, k.sel!.day + dd)) })
+        setSel({ catId: c.id, day: Math.min(k.grid!.days, Math.max(1, k.sel!.day + dd)), ...(dc === 0 && k.sel!.subId !== undefined ? { subId: k.sel!.subId } : {}) })
       }
       if (e.key === 'ArrowLeft') move(0, -1)
       else if (e.key === 'ArrowRight') move(0, 1)
       else if (e.key === 'ArrowUp') move(-1, 0)
       else if (e.key === 'ArrowDown') move(1, 0)
       else if (e.key === 'Enter') { e.preventDefault(); setEditing(k.sel) }
-      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); saveCell(k.sel.catId, k.sel.day, 0) }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); saveCell(k.sel.catId, k.sel.day, 0, k.sel.subId) }
       else if (/^[0-9.\-]$/.test(e.key)) { e.preventDefault(); setQuick({ ...k.sel, text: e.key }) }
     }
     window.addEventListener('keydown', onKey)
@@ -150,17 +168,49 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
   const editingCat = editing ? cats.find(c => c.id === editing.catId) : undefined
 
   /** Sub-category rows of a category: its sub-categories with spend (or still active) + Unassigned if any. */
-  const subRows = (cat: GridCategory) => {
+  const subRows = (cat: GridCategory): SubRowData[] => {
+    const cached = subRowCache.get(cat.id)
+    if (cached) return cached
     const totals = new Map(cat.subs.map(s => [s.subcategory_id, s.total]))
-    const rows = grid.subcategories
+    const sums = new Map<number | null, number[]>()
+    for (const d of dayNums) {
+      for (const e of cat.days[d]?.entries ?? []) {
+        let a = sums.get(e.subcategory_id)
+        if (!a) { a = dayNums.map(() => 0); sums.set(e.subcategory_id, a) }
+        a[d - 1] += e.amount
+      }
+    }
+    const list = grid.subcategories
       .filter(s => s.category_id === cat.id && (totals.has(s.id) || !s.archived))
       .map(s => ({ id: s.id as number | null, name: s.name }))
-    if (totals.has(null)) rows.push({ id: null, name: 'Unassigned' })
-    return rows.map(r => ({
-      ...r,
-      total: totals.get(r.id) ?? 0,
-      perDay: dayNums.map(d => (cat.days[d]?.entries ?? []).filter(e => e.subcategory_id === r.id).reduce((s, e) => s + e.amount, 0)),
-    }))
+    if (totals.has(null)) list.push({ id: null, name: 'Unassigned' })
+    const rows = list.map(r => ({ ...r, total: totals.get(r.id) ?? 0, perDay: sums.get(r.id) ?? dayNums.map(() => 0) }))
+    subRowCache.set(cat.id, rows)
+    return rows
+  }
+
+  /** One day cell, either a category's own or one of its sub-category rows (subId): select, edit-in-place, open details. */
+  const gridCell = (cat: GridCategory, d: number, subId: number | null | undefined, display: React.ReactNode, style: React.CSSProperties, title?: string) => {
+    const isSel = sel?.catId === cat.id && sel.day === d && sel.subId === subId
+    const isQuick = quick?.catId === cat.id && quick.day === d && quick.subId === subId
+    return (
+      <td key={d} title={title}
+        onClick={() => { if (isSel) setEditing({ catId: cat.id, day: d, subId }); else { setQuick(null); setSel({ catId: cat.id, day: d, subId }) } }}
+        onDoubleClick={() => setEditing({ catId: cat.id, day: d, subId })}
+        style={{ ...slim(d), ...band(d), textAlign: 'center', cursor: 'pointer', ...style, outline: isSel ? `1.5px solid ${T.accent}` : undefined, outlineOffset: -1.5 }}>
+        {isQuick ? (
+          <input autoFocus inputMode="decimal" value={quick!.text} onChange={e => setQuick({ ...quick!, text: e.target.value })}
+            onFocus={e => e.target.setSelectionRange(e.target.value.length, e.target.value.length)}
+            onBlur={() => commitQuick(quick!)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); commitQuick(quick!) }
+              else if (e.key === 'Escape') { setQuick(null) }
+              else if (e.key === 'Tab') { e.preventDefault(); const q = quick!; commitQuick(q); setSel({ catId: q.catId, day: Math.min(grid.days, q.day + 1), subId: q.subId }) }
+            }}
+            style={{ ...input, width: 58, padding: '5px 4px', textAlign: 'center', borderColor: T.accent }} />
+        ) : display}
+      </td>
+    )
   }
 
   // Every other day column is a shade lighter, so the eye can follow a date down the grid. It is a faint overlay
@@ -260,29 +310,10 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
                       const cell = cat.days[d]
                       const amt = cell?.amount ?? 0
                       const multi = (cell?.entries.length ?? 0) > 1
-                      const isSel = sel?.catId === cat.id && sel.day === d
-                      const isQuick = quick?.catId === cat.id && quick.day === d
-                      return (
-                        <td key={d}
-                          onClick={() => { if (isSel) setEditing({ catId: cat.id, day: d }); else { setQuick(null); setSel({ catId: cat.id, day: d }) } }}
-                          onDoubleClick={() => setEditing({ catId: cat.id, day: d })}
-                          title={cell ? cell.entries.map(e => `${grid.subcategories.find(s => s.id === e.subcategory_id)?.name ?? 'Unassigned'}: ${fmtFull(e.amount)}${e.note ? ` (${e.note})` : ''}`).join('\n') : undefined}
-                          style={{ ...slim(d), ...band(d), textAlign: 'center', cursor: 'pointer', padding: empty ? '6px 4px' : '9px 4px', fontWeight: 400, backgroundColor: amt ? `${cat.color}2b` : undefined, outline: isSel ? `1.5px solid ${T.accent}` : undefined, outlineOffset: -1.5 }}>
-                          {isQuick ? (
-                            <input autoFocus inputMode="decimal" value={quick!.text} onChange={e => setQuick({ ...quick!, text: e.target.value })}
-                              onFocus={e => e.target.setSelectionRange(e.target.value.length, e.target.value.length)}
-                              onBlur={() => commitQuick(quick!)}
-                              onKeyDown={e => {
-                                if (e.key === 'Enter') { e.preventDefault(); commitQuick(quick!) }
-                                else if (e.key === 'Escape') { setQuick(null) }
-                                else if (e.key === 'Tab') { e.preventDefault(); const q = quick!; commitQuick(q); setSel({ catId: q.catId, day: Math.min(grid.days, q.day + 1) }) }
-                              }}
-                              style={{ ...input, width: 58, padding: '5px 4px', textAlign: 'center', borderColor: T.accent }} />
-                          ) : (
-                            <>{amt ? fmt(amt) : ''}{multi && <sup style={{ color: T.muted, marginLeft: 1 }}>{cell.entries.length}</sup>}</>
-                          )}
-                        </td>
-                      )
+                      return gridCell(cat, d, undefined,
+                        <>{amt ? fmt(amt) : ''}{multi && <sup style={{ color: T.muted, marginLeft: 1 }}>{cell.entries.length}</sup>}</>,
+                        { padding: empty ? '6px 4px' : '9px 4px', fontWeight: 400, backgroundColor: amt ? `${cat.color}2b` : undefined },
+                        cell ? cell.entries.map(e => `${grid.subcategories.find(s => s.id === e.subcategory_id)?.name ?? 'Unassigned'}: ${fmtFull(e.amount)}${e.note ? ` (${e.note})` : ''}`).join('\n') : undefined)
                     })}
                     <td style={{ ...stickyRight(SIDE_BG, END_W), textAlign: 'center', lineHeight: 1.25, color: over ? T.negative : T.text, fontWeight: 400 }}>
                       {cat.total ? `${pct.toFixed(2)}%` : <span style={{ color: T.muted, fontWeight: 400 }}>—</span>}
@@ -298,7 +329,7 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
                       <td style={{ position: 'sticky', left: 0, zIndex: 1, background: SIDE_BG, padding: '6px 14px 6px 48px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 11.5, boxShadow: 'inset 0 1px 0 var(--ov-6)' }}>
                         {r.name}
                       </td>
-                      {r.perDay.map((v, i) => <td key={i} style={{ ...slim(i + 1), ...band(i + 1), textAlign: 'center', fontSize: 11 }}>{v ? fmt(v) : ''}</td>)}
+                      {r.perDay.map((v, i) => gridCell(cat, i + 1, r.id, v ? fmt(v) : '', { fontSize: 11 }))}
                       <td style={{ ...stickyRight(SIDE_BG, END_W), boxShadow: '-8px 0 8px -8px var(--shadow), inset 0 1px 0 var(--ov-6)', textAlign: 'center', fontSize: 11, lineHeight: 1.25 }}>
                         {r.total ? <>{grid.income ? `${((r.total / grid.income) * 100).toFixed(2)}%` : ''}<div style={{ fontSize: 9.5, opacity: 0.8 }}>{fmt(r.total)}</div></> : '—'}
                       </td>
@@ -326,9 +357,15 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
       </div>
 
       {editing && editingCat && (
-        <CellEditor category={editingCat} day={editing.day} month={month} subs={grid.subcategories}
-          entries={editingCat.days[editing.day]?.entries ?? []} onClose={() => setEditing(null)}
-          onSave={lines => { const e = editing; setEditing(null); run(setCellEntries(e.catId, `${month}-${pad(e.day)}`, lines)) }} />
+        <CellEditor category={editingCat} day={editing.day} month={month} subs={grid.subcategories} subId={editing.subId}
+          entries={(editingCat.days[editing.day]?.entries ?? []).filter(x => editing.subId === undefined || x.subcategory_id === editing.subId)}
+          onClose={() => setEditing(null)}
+          onSave={lines => {
+            const e = editing
+            setEditing(null)
+            const others = e.subId === undefined ? [] : othersOf(editingCat.days[e.day]?.entries ?? [], e.subId)
+            run(setCellEntries(e.catId, `${month}-${pad(e.day)}`, [...others, ...lines]))
+          }} />
       )}
       {adding && (
         <AddDialog cats={openCats} subs={grid.subcategories} days={grid.days} onClose={() => setAdding(false)}

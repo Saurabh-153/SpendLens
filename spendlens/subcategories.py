@@ -8,6 +8,11 @@ screen) always win.
 import re
 import sqlite3
 
+from sqlalchemy import case, exists, select
+
+from db.base import row_dict
+from db.models import Expense, Subcategory
+
 # category name -> [(sub-category name, [patterns])]; order = display order
 SEED = {
     "Rent / EMI": [
@@ -227,16 +232,17 @@ def subcategory_status(sub, today):
     return "active"
 
 
-def subcategories_for_month(db, month, category_id=None):
+def subcategories_for_month(session, month, category_id=None):
     """Sub-categories to offer/show in a month: inside their [start, end] range, or holding data that month."""
-    where = "WHERE s.category_id=?" if category_id else ""
-    params = [f"{month}-%"] + ([category_id] if category_id else [])
-    rows = db.execute(f"""
-        SELECT s.*, EXISTS(SELECT 1 FROM expenses e WHERE e.subcategory_id=s.id AND e.date LIKE ?) AS month_has_data
-        FROM subcategories s {where} ORDER BY s.category_id, s.sort_order, s.id""", params).fetchall()
+    has_data = exists().where(Expense.subcategory_id == Subcategory.id, Expense.date.like(f"{month}-%"))
+    q = select(Subcategory, case((has_data, 1), else_=0).label("month_has_data"))
+    if category_id:
+        q = q.where(Subcategory.category_id == category_id)
+    rows = session.execute(q.order_by(Subcategory.category_id, Subcategory.sort_order, Subcategory.id)).all()
     out = []
     for r in rows:
-        d = dict(r)
+        d = row_dict(r[0])
+        d["month_has_data"] = r.month_has_data
         in_range = d["start_month"] <= month and (d["end_month"] is None or month <= d["end_month"])
         if in_range or d.pop("month_has_data"):
             d["archived"] = not in_range
@@ -244,11 +250,11 @@ def subcategories_for_month(db, month, category_id=None):
     return out
 
 
-def sub_allowed(db, category_id, sub_id, month, keep_sub_id=None):
+def sub_allowed(session, category_id, sub_id, month, keep_sub_id=None):
     """True if `sub_id` belongs to the category and is active in `month` (or is the entry's current value)."""
-    row = db.execute("SELECT * FROM subcategories WHERE id=?", (sub_id,)).fetchone()
-    if not row or row["category_id"] != category_id:
+    row = session.get(Subcategory, sub_id)
+    if not row or row.category_id != category_id:
         return False
     if sub_id == keep_sub_id:
         return True
-    return row["start_month"] <= month and (row["end_month"] is None or month <= row["end_month"])
+    return row.start_month <= month and (row.end_month is None or month <= row.end_month)

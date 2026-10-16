@@ -1,5 +1,8 @@
-"""Shared by every routes/*_routes.py module: one connection-lifecycle dependency."""
+"""Shared by every routes/*_routes.py module: the connection-lifecycle dependency, and a helper
+for routes that are partway through the SQLAlchemy cutover (some of their own queries on ORM
+models, others - complex joins, or tables not modeled yet - still on the raw connection)."""
 from database import get_db
+from db.base import row_dict  # noqa: F401  (re-exported: routes import it from here)
 
 
 def get_db_dep():
@@ -11,3 +14,4 @@ def get_db_dep():
         yield db
     finally:
         db.close()
+
