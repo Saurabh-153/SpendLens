@@ -9,22 +9,18 @@ Realised gain is measured against the holding's average cost (no lot tracking), 
 from datetime import date
 
 from accrual import _deposits, _iso
+from db.base import row_dict
+from db.models import Holding
+from db.models.portfolio import LedgerTransaction
 from portfolio import xirr
 
 KINDS = ("BUY", "SELL", "DIVIDEND", "OPENING")
 DIRECT = ("MF", "FD", "PF")
 
 
-def ensure(db):
-    # user_id is baked in here (not left for database.py's _m003_user_id_columns to ALTER in)
-    # because this table is created lazily, on first use - _add_column skips tables that don't
-    # exist yet, so on a genuinely fresh database that migration would otherwise permanently
-    # no-op before this CREATE ever runs. Same reasoning as portfolio_goals in portfolio.py.
-    db.execute("""CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, holding_id INTEGER, name TEXT DEFAULT '', tx_date TEXT NOT NULL, kind TEXT NOT NULL,
-        qty REAL DEFAULT 0, price REAL DEFAULT 0, amount REAL DEFAULT 0, fees REAL DEFAULT 0, realized REAL DEFAULT 0,
-        note TEXT DEFAULT '', source TEXT DEFAULT 'manual', applied INTEGER DEFAULT 0, user_id INTEGER DEFAULT 1)""")
-    db.commit()
+def rows(session):
+    """Every ledger row as a dict, oldest first."""
+    return [row_dict(t) for t in session.query(LedgerTransaction).order_by(LedgerTransaction.tx_date, LedgerTransaction.id).all()]
 
 
 def fy_of(d):
@@ -33,8 +29,8 @@ def fy_of(d):
     return f"FY{y - 1}-{str(y)[2:]}"
 
 
-def add(db, d, h=None):
-    """Insert a transaction; `h` is the holding row (or None). Returns the new id. Raises ValueError for bad input."""
+def add(session, d, h=None):
+    """Insert a transaction; `h` is the holding as a dict (or None). Returns the new id. Raises ValueError for bad input."""
     kind = d["kind"].upper()
     if kind not in KINDS:
         raise ValueError("Unknown transaction type")
@@ -66,33 +62,34 @@ def add(db, d, h=None):
             realized = amount - h["qty"] * h["buy_price"] * frac
     if d.get("apply") and kind in ("BUY", "SELL") and h:
         applied = 1
+        row = session.get(Holding, h["id"])
         if priced:
             if kind == "BUY":
                 nq = h["qty"] + qty
-                db.execute("UPDATE holdings SET qty=?, buy_price=?, cmp=CASE WHEN cmp>0 THEN cmp ELSE ? END WHERE id=?",
-                           (nq, (h["qty"] * h["buy_price"] + amount) / nq, price, h["id"]))
+                row.qty, row.buy_price = nq, (h["qty"] * h["buy_price"] + amount) / nq
+                row.cmp = h["cmp"] if (h["cmp"] or 0) > 0 else price
             else:
                 if qty > h["qty"] + 1e-9:
                     raise ValueError(f"You only hold {h['qty']:g}")
-                db.execute("UPDATE holdings SET qty=? WHERE id=?", (h["qty"] - qty, h["id"]))
+                row.qty = h["qty"] - qty
         else:
             value = h["qty"] * h["cmp"]
             if kind == "BUY":
                 units = h["units"] + amount / h["nav"] if (h["units"] or 0) > 0 and (h["nav"] or 0) > 0 else h["units"]
-                db.execute("UPDATE holdings SET qty=1, buy_price=?, cmp=?, units=? WHERE id=?",
-                           (h["qty"] * h["buy_price"] + amount, (units * h["nav"]) if units and h["nav"] else value + amount, units or 0, h["id"]))
+                row.qty, row.buy_price = 1, h["qty"] * h["buy_price"] + amount
+                row.cmp, row.units = (units * h["nav"]) if units and h["nav"] else value + amount, units or 0
             else:
                 if amount > value + 0.5:
                     raise ValueError("Withdrawal is more than the holding is worth")
                 frac = amount / value if value else 0
-                db.execute("UPDATE holdings SET qty=1, buy_price=?, cmp=?, units=? WHERE id=?",
-                           (h["qty"] * h["buy_price"] * (1 - frac), value * (1 - frac), (h["units"] or 0) * (1 - frac), h["id"]))
-    cur = db.execute("""INSERT INTO transactions (holding_id, name, tx_date, kind, qty, price, amount, fees, realized, note, source, applied)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                     (h["id"] if h else None, (h["name"] if h else d.get("name", "")).strip(), d["tx_date"], kind, qty, price, round(amount, 2),
-                      fees, round(realized, 2), d.get("note", ""), d.get("source", "manual"), applied))
-    db.commit()
-    return cur.lastrowid
+                row.qty, row.buy_price = 1, h["qty"] * h["buy_price"] * (1 - frac)
+                row.cmp, row.units = value * (1 - frac), (h["units"] or 0) * (1 - frac)
+    t = LedgerTransaction(holding_id=h["id"] if h else None, name=(h["name"] if h else d.get("name", "")).strip(), tx_date=d["tx_date"],
+                          kind=kind, qty=qty, price=price, amount=round(amount, 2), fees=fees, realized=round(realized, 2),
+                          note=d.get("note", ""), source=d.get("source", "manual"), applied=applied)
+    session.add(t)
+    session.commit()
+    return t.id
 
 
 def _virtual_flows(h, today):
@@ -107,13 +104,12 @@ def _virtual_flows(h, today):
     return [(start, -h["invested"])]
 
 
-def summary(db, held, today=None):
+def summary(session, held, today=None):
     """Per-financial-year totals and XIRR (portfolio and per holding) from the ledger."""
     today = today or date.today()
-    ensure(db)
-    rows = [dict(r) for r in db.execute("SELECT * FROM transactions ORDER BY tx_date, id")]
+    txs_all = rows(session)
     fys = {}
-    for r in rows:
+    for r in txs_all:
         f = fys.setdefault(fy_of(r["tx_date"]), {"fy": fy_of(r["tx_date"]), "dividends": 0.0, "realized": 0.0, "bought": 0.0, "sold": 0.0})
         if r["kind"] == "DIVIDEND":
             f["dividends"] += r["amount"]
@@ -122,7 +118,7 @@ def summary(db, held, today=None):
         elif r["kind"] == "BUY":
             f["bought"] += r["amount"]
     by_h = {}
-    for r in rows:
+    for r in txs_all:
         if r["holding_id"]:
             by_h.setdefault(r["holding_id"], []).append(r)
     out, all_flows, covered_val, total_val = [], [], 0.0, sum(h["present"] for h in held)

@@ -21,9 +21,14 @@ def test_versions_are_unique_and_ordered():
 
 
 def test_seeded_db_is_fully_migrated(seeded_db):
-    conn = connect(seeded_db)
-    assert database.schema_version(conn) == database.MIGRATIONS[-1][0]
-    assert database.pending_migrations(conn) == []
+    """A database Alembic built from empty records every pre-Alembic step as done, so the legacy path never reruns one."""
+    from dbutil import test_db
+    db = test_db()
+    try:
+        done = [r[0] for r in db.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()]
+    finally:
+        db.close()
+    assert done == [m[0] for m in database.MIGRATIONS]
 
 
 def test_running_twice_applies_nothing_the_second_time(unmigrated_db):

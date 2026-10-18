@@ -6,7 +6,11 @@ manual edits are never recalculated or reverted. Each application is logged in `
 Months that were missed (app not opened) are caught up the next time the data is read.
 """
 import calendar
-from datetime import date
+from datetime import date, datetime, timezone
+
+from db import failover
+from db.models import Holding
+from db.models.portfolio import LedgerTransaction, SipLog
 
 DIRECT = ("MF", "FD", "PF")
 
@@ -36,36 +40,41 @@ def baseline(day, today):
     return _prev(cur) if _due_date(cur, day) > today else cur
 
 
-def set_sip(db, hid, amount, day, today=None):
+def set_sip(session, hid, amount, day, today=None):
+    """Set a holding's SIP. Does not commit: the caller does, together with its own changes."""
     today = today or date.today()
-    row = db.execute("SELECT sip_day, sip_applied FROM holdings WHERE id=?", (hid,)).fetchone()
-    if not row:
+    h = session.get(Holding, hid)
+    if not h:
         return False
-    applied = row["sip_applied"]
-    if day > 0 and (row["sip_day"] != day or not applied):
+    applied = h.sip_applied
+    if day > 0 and (h.sip_day != day or not applied):
         applied = baseline(day, today)
-    db.execute("UPDATE holdings SET sip_amount=?, sip_day=?, sip_applied=? WHERE id=?", (amount, day, applied or "", hid))
+    h.sip_amount, h.sip_day, h.sip_applied = amount, day, applied or ""
     return True
 
 
-def apply_due_sips(db, today=None):
+def _now_utc_text():
+    """The timestamp format SQLite's datetime('now') produced for sip_log.applied_at (UTC, to the second)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def apply_due_sips(session, today=None):
     """Apply every SIP whose date has passed and was not applied yet. Returns the number applied."""
+    if failover.read_only():  # on the read-only mirror: catch up once PostgreSQL is back
+        return 0
     today = today or date.today()
     cur, n = _ym(today), 0
-    import ledger
-    ledger.ensure(db)
-    rows = db.execute("SELECT * FROM holdings WHERE sip_amount>0 AND sip_day>0").fetchall()
-    for h in rows:
-        applied = h["sip_applied"] or baseline(h["sip_day"], today)
-        qty, buy, cmp_ = h["qty"], h["buy_price"], h["cmp"]
+    for h in session.query(Holding).filter(Holding.sip_amount > 0, Holding.sip_day > 0).order_by(Holding.id).all():
+        applied = h.sip_applied or baseline(h.sip_day, today)
+        qty, buy, cmp_ = h.qty, h.buy_price, h.cmp
         units = 0.0
         m = _next(applied)
-        while m <= cur and _due_date(m, h["sip_day"]) <= today:
-            amt = h["sip_amount"]
-            if h["asset_type"] == "MF" and (h["units"] or 0) > 0 and (h["nav"] or 0) > 0:
-                units = (units or h["units"]) + amt / h["nav"]  # priced by NAV: buy units at today's NAV
-                qty, buy, cmp_ = 1.0, buy + amt, units * h["nav"]
-            elif h["asset_type"] in DIRECT:
+        while m <= cur and _due_date(m, h.sip_day) <= today:
+            amt = h.sip_amount
+            if h.asset_type == "MF" and (h.units or 0) > 0 and (h.nav or 0) > 0:
+                units = (units or h.units) + amt / h.nav  # priced by NAV: buy units at today's NAV
+                qty, buy, cmp_ = 1.0, buy + amt, units * h.nav
+            elif h.asset_type in DIRECT:
                 qty, buy, cmp_ = 1.0, buy + amt, cmp_ + amt
             elif cmp_ > 0:
                 units = amt / cmp_
@@ -73,17 +82,16 @@ def apply_due_sips(db, today=None):
                 qty += units
             else:
                 break  # priced holding without a price: nothing sensible to add
-            db.execute("INSERT INTO sip_log (holding_id, holding_name, month, sip_date, amount) VALUES (?,?,?,?,?)",
-                       (h["id"], h["name"], m, _due_date(m, h["sip_day"]).isoformat(), amt))
-            unit_priced = h["asset_type"] not in DIRECT or (h["asset_type"] == "MF" and (h["units"] or 0) > 0)
-            nav = (h["nav"] if h["asset_type"] == "MF" else cmp_) if unit_priced else 0
-            db.execute("""INSERT INTO transactions (holding_id, name, tx_date, kind, qty, price, amount, source, applied)
-                          VALUES (?,?,?,'BUY',?,?,?,'sip',1)""",
-                       (h["id"], h["name"], _due_date(m, h["sip_day"]).isoformat(), amt / nav if nav else 0, nav or 0, amt))
+            due = _due_date(m, h.sip_day).isoformat()
+            session.add(SipLog(holding_id=h.id, holding_name=h.name, month=m, sip_date=due, amount=amt, applied_at=_now_utc_text()))
+            unit_priced = h.asset_type not in DIRECT or (h.asset_type == "MF" and (h.units or 0) > 0)
+            nav = (h.nav if h.asset_type == "MF" else cmp_) if unit_priced else 0
+            session.add(LedgerTransaction(holding_id=h.id, name=h.name, tx_date=due, kind="BUY", qty=amt / nav if nav else 0,
+                                          price=nav or 0, amount=amt, source="sip", applied=1))
             applied, n = m, n + 1
             m = _next(m)
-        db.execute("UPDATE holdings SET qty=?, buy_price=?, cmp=?, sip_applied=?, units=? WHERE id=?",
-                   (qty, buy, cmp_, applied, units or h["units"], h["id"]))
+        # written back even when nothing was due, as before (it also stores the baseline month on first sight)
+        h.qty, h.buy_price, h.cmp, h.sip_applied, h.units = qty, buy, cmp_, applied, units or h.units
     if n:
-        db.commit()
+        session.commit()
     return n

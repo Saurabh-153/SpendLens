@@ -15,24 +15,16 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
+
+from db.base import row_dict
+from db.models import Holding
+from db.models.portfolio import PriceHistory, PriceRun
+
 AMFI_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{}?range=5d&interval=1d"
 YAHOO_SEARCH = "https://query1.finance.yahoo.com/v1/finance/search?q={}&quotesCount=8&newsCount=0"
 HEADERS = {"User-Agent": "Mozilla/5.0 (SpendLens)"}
 CLOSE_TIMES = ((19, 0), (22, 30))  # equity closes 15:30; AMFI usually posts the NAV file in the evening
-
-
-def ensure(db):
-    cols = {r[1] for r in db.execute("PRAGMA table_info(holdings)")}
-    for name, ddl in (("scheme_code", "TEXT DEFAULT ''"), ("units", "REAL DEFAULT 0"), ("nav", "REAL DEFAULT 0"),
-                      ("auto_price", "INTEGER DEFAULT 0"), ("price_date", "TEXT DEFAULT ''"), ("price_note", "TEXT DEFAULT ''")):
-        if name not in cols:
-            db.execute(f"ALTER TABLE holdings ADD COLUMN {name} {ddl}")
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS price_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, ran_at TEXT, ok INTEGER, updated INTEGER, failed INTEGER, detail TEXT);
-        CREATE TABLE IF NOT EXISTS price_history (holding_id INTEGER, price_date TEXT, price REAL, PRIMARY KEY (holding_id, price_date));
-    """)
-    db.commit()
 
 
 def _get(url, timeout=30):
@@ -100,58 +92,69 @@ def yahoo_search(name):
             for r in res if r.get("symbol", "").endswith(".NS")]
 
 
-def run_refresh(db):
+def _price_point(session, holding_id, day, price):
+    """Store one day's price, replacing an earlier figure for the same day."""
+    p = session.get(PriceHistory, (holding_id, day))
+    if p:
+        p.price = price
+    else:
+        session.add(PriceHistory(holding_id=holding_id, price_date=day, price=price))
+
+
+def run_refresh(session):
     """Update every auto-priced holding. Returns {updated, failed, errors, ran_at}."""
-    ensure(db)
-    rows = db.execute("SELECT * FROM holdings WHERE auto_price=1").fetchall()
-    eq = [r for r in rows if r["asset_type"] in ("EQ", "GOLD") and r["ticker"]]  # listed gold ETFs price like equity
-    mf = [r for r in rows if r["asset_type"] == "MF" and r["scheme_code"] and (r["units"] or 0) > 0]
+    rows = session.query(Holding).filter(Holding.auto_price == 1).order_by(Holding.id).all()
+    eq = [r for r in rows if r.asset_type in ("EQ", "GOLD") and r.ticker]  # listed gold ETFs price like equity
+    mf = [r for r in rows if r.asset_type == "MF" and r.scheme_code and (r.units or 0) > 0]
     updated, errors = 0, []
 
-    def quote(r):
+    def quote(ticker):  # network only: runs in worker threads, never touches the session
         try:
-            return r, yahoo_quote(r["ticker"]), None
+            return yahoo_quote(ticker), None
         except Exception as e:  # network, bad symbol, rate limit ...
-            return r, None, str(e)[:120]
+            return None, str(e)[:120]
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(quote, eq))
-    for r, q, err in results:
+        results = list(pool.map(quote, [r.ticker for r in eq]))
+    for r, (q, err) in zip(eq, results):
         if q:
-            db.execute("UPDATE holdings SET cmp=?, week52_low=?, week52_high=?, price_date=?, price_note='' WHERE id=?",
-                       (q["price"], q["low"], q["high"], q["date"], r["id"]))
-            db.execute("INSERT OR REPLACE INTO price_history (holding_id, price_date, price) VALUES (?,?,?)", (r["id"], q["date"], q["price"]))
+            r.cmp, r.week52_low, r.week52_high, r.price_date, r.price_note = q["price"], q["low"], q["high"], q["date"], ""
+            _price_point(session, r.id, q["date"], q["price"])
             updated += 1
         else:
-            db.execute("UPDATE holdings SET price_note=? WHERE id=?", (err, r["id"]))
-            errors.append(f"{r['name']}: {err}")
+            r.price_note = err
+            errors.append(f"{r.name}: {err}")
     if mf:
         try:
             amfi = fetch_amfi(0)  # always fresh for the scheduled run
         except Exception as e:
             amfi, err = {}, str(e)[:120]
             errors.append(f"AMFI: {err}")
-            db.executemany("UPDATE holdings SET price_note=? WHERE id=?", [(err, r["id"]) for r in mf])
+            for r in mf:
+                r.price_note = err
         for r in mf:
-            s = amfi.get(r["scheme_code"])
+            s = amfi.get(r.scheme_code)
             if s:
-                db.execute("UPDATE holdings SET qty=1, nav=?, cmp=?, price_date=?, price_note='' WHERE id=?",
-                           (s["nav"], round(r["units"] * s["nav"], 2), s["date"], r["id"]))
-                db.execute("INSERT OR REPLACE INTO price_history (holding_id, price_date, price) VALUES (?,?,?)", (r["id"], s["date"], s["nav"]))
+                r.qty, r.nav, r.cmp, r.price_date, r.price_note = 1, s["nav"], round(r.units * s["nav"], 2), s["date"], ""
+                _price_point(session, r.id, s["date"], s["nav"])
                 updated += 1
             elif amfi:
-                db.execute("UPDATE holdings SET price_note='scheme code not in AMFI file' WHERE id=?", (r["id"],))
-                errors.append(f"{r['name']}: scheme code not found")
+                r.price_note = "scheme code not in AMFI file"
+                errors.append(f"{r.name}: scheme code not found")
     ran = datetime.now().isoformat(timespec="seconds")
-    db.execute("INSERT INTO price_runs (ran_at, ok, updated, failed, detail) VALUES (?,?,?,?,?)",
-               (ran, 0 if errors and not updated else 1, updated, len(errors), "; ".join(errors)[:1000]))
-    db.commit()
+    session.add(PriceRun(ran_at=ran, ok=0 if errors and not updated else 1, updated=updated, failed=len(errors), detail="; ".join(errors)[:1000]))
+    session.commit()
     return {"ran_at": ran, "updated": updated, "failed": len(errors), "errors": errors}
 
 
-def last_ok_run(db):
-    r = db.execute("SELECT ran_at FROM price_runs WHERE ok=1 ORDER BY id DESC LIMIT 1").fetchone()
-    return datetime.fromisoformat(r["ran_at"]) if r else None
+def recent_runs(session, limit=8):
+    """The latest refresh runs, newest first, as dicts."""
+    return [row_dict(r) for r in session.query(PriceRun).order_by(PriceRun.id.desc()).limit(limit).all()]
+
+
+def last_ok_run(session):
+    r = session.query(PriceRun.ran_at).filter(PriceRun.ok == 1).order_by(PriceRun.id.desc()).first()
+    return datetime.fromisoformat(r[0]) if r else None
 
 
 def latest_close(now):
@@ -168,9 +171,9 @@ def latest_close(now):
     return None
 
 
-def is_stale(db, now=None):
+def is_stale(session, now=None):
     now = now or datetime.now()
-    due, last = latest_close(now), last_ok_run(db)
+    due, last = latest_close(now), last_ok_run(session)
     return bool(due) and (last is None or last < due)
 
 

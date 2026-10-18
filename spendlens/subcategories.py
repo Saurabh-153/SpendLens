@@ -8,10 +8,10 @@ screen) always win.
 import re
 import sqlite3
 
-from sqlalchemy import case, exists, select
+from sqlalchemy import case, exists, select, update
 
 from db.base import row_dict
-from db.models import Expense, Subcategory
+from db.models import Expense, Subcategory, SubcategoryRule
 
 # category name -> [(sub-category name, [patterns])]; order = display order
 SEED = {
@@ -138,9 +138,10 @@ def normalize(note):
     return re.sub(r"\s+", " ", (note or "").strip().lower())
 
 
-def load_rules(db, category_id):
-    return db.execute("SELECT pattern, match_type, subcategory_id FROM subcategory_rules WHERE category_id=?",
-                      (category_id,)).fetchall()
+def load_rules(session, category_id):
+    rows = session.execute(select(SubcategoryRule.pattern, SubcategoryRule.match_type, SubcategoryRule.subcategory_id)
+                           .where(SubcategoryRule.category_id == category_id).order_by(SubcategoryRule.id)).all()
+    return [dict(r._mapping) for r in rows]
 
 
 def match_rules(rules, note):
@@ -163,19 +164,36 @@ def match_rules(rules, note):
     return best[1] if best else None
 
 
-def apply_rules(db, only_unmapped=True):
-    """(Re)map expenses by note. Returns number of expenses updated."""
-    where = "WHERE subcategory_id IS NULL" if only_unmapped else ""
-    rows = db.execute(f"SELECT id, category_id, note FROM expenses {where}").fetchall()
+def apply_rules(session, only_unmapped=True):
+    """(Re)map expenses by note. Returns number of expenses updated; the caller commits.
+    Takes a Session or a Connection (e.g. Alembic's op.get_bind())."""
+    q = select(Expense.id, Expense.category_id, Expense.note)
+    if only_unmapped:
+        q = q.where(Expense.subcategory_id.is_(None))
     cache, updated = {}, 0
-    for r in rows:
-        if r["category_id"] not in cache:
-            cache[r["category_id"]] = load_rules(db, r["category_id"])
-        sid = match_rules(cache[r["category_id"]], r["note"])
+    for eid, cid, note in session.execute(q.order_by(Expense.id)).all():
+        if cid not in cache:
+            cache[cid] = load_rules(session, cid)
+        sid = match_rules(cache[cid], note)
         if sid:
-            db.execute("UPDATE expenses SET subcategory_id=? WHERE id=?", (sid, r["id"]))
+            session.execute(update(Expense).where(Expense.id == eid).values(subcategory_id=sid))
             updated += 1
     return updated
+
+
+def _apply_rules_sqlite(conn):
+    """Raw-sqlite3 twin of apply_rules for the startup migrate() below, which runs on init_db's connection
+    before the ORM is in play. Goes away when Alembic owns the schema and seed data."""
+    rows = conn.execute("SELECT id, category_id, note FROM expenses WHERE subcategory_id IS NULL").fetchall()
+    cache = {}
+    for r in rows:
+        if r["category_id"] not in cache:
+            cache[r["category_id"]] = conn.execute(
+                "SELECT pattern, match_type, subcategory_id FROM subcategory_rules WHERE category_id=? ORDER BY id",
+                (r["category_id"],)).fetchall()
+        sid = match_rules(cache[r["category_id"]], r["note"])
+        if sid:
+            conn.execute("UPDATE expenses SET subcategory_id=? WHERE id=?", (sid, r["id"]))
 
 
 def migrate(conn, db_path):
@@ -220,7 +238,7 @@ def migrate(conn, db_path):
                     c.execute("INSERT INTO subcategory_rules (category_id, pattern, match_type, subcategory_id) VALUES (?,?,?,?)",
                               (cat["id"], p, "contains", sid))
     if first_run:
-        apply_rules(conn)
+        _apply_rules_sqlite(conn)
     conn.row_factory = old_factory
 
 

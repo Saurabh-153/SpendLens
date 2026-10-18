@@ -10,7 +10,7 @@ import os
 import pytest
 
 import cards
-import database
+from dbutil import test_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PDFS = sorted(glob.glob(os.path.join(ROOT, "screenshot", "6801*.pdf")))  # the SBI Card statements
@@ -123,7 +123,7 @@ def test_earn_is_ordered_by_date_not_list_order():
 
 
 def test_a_user_rule_overrides_the_defaults(seeded_db):
-    db = database.get_db()
+    db = test_db()
     try:
         card = cards.get_card(db)
         assert card, "migration 4 should seed a card"
@@ -139,7 +139,7 @@ def test_a_user_rule_overrides_the_defaults(seeded_db):
 
 
 def test_dashboard_without_statements_is_empty_not_broken(seeded_db):
-    db = database.get_db()
+    db = test_db()
     try:
         d = cards.dashboard(db)
         assert d["card"] is not None
@@ -167,7 +167,7 @@ def test_every_real_statement_parses_and_balances():
 
 @needs_pdfs
 def test_importing_twice_adds_no_rows(seeded_db, tmp_path):
-    db = database.get_db()
+    db = test_db()
     try:
         cid = cards.get_card(db)["id"]
         files = [(os.path.basename(p), p) for p in PDFS]
@@ -184,7 +184,7 @@ def test_importing_twice_adds_no_rows(seeded_db, tmp_path):
 @needs_pdfs
 def test_computed_cashback_is_close_to_what_was_paid(seeded_db):
     """The rules are a model, not the truth; this pins how far off the model may drift."""
-    db = database.get_db()
+    db = test_db()
     try:
         cid = cards.get_card(db)["id"]
         cards.import_files(db, cid, [(os.path.basename(p), p) for p in PDFS], PASSWORD)

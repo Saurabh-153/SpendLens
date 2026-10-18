@@ -2,6 +2,8 @@
 goals and the mix/plan key-value store. Mirrors the tables `database.py`/`portfolio.py` created
 by hand; column names and defaults are kept identical so existing data reads unchanged.
 """
+from typing import Optional
+
 from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,6 +46,7 @@ class Holding(Base):
     price_note: Mapped[str] = mapped_column(default="")
     tags: Mapped[str] = mapped_column(default="")
     exposure: Mapped[str] = mapped_column(default="")
+    sip_reminder: Mapped[int] = mapped_column(default=1, server_default="1")
 
 
 class HoldingGroup(Base):
@@ -104,3 +107,69 @@ class PortfolioPlan(Base):
     user_id: Mapped[int] = mapped_column(default=1)
     key: Mapped[str]
     value: Mapped[str] = mapped_column(nullable=True)
+
+
+# The tables below predate the ORM. Columns are declared in the existing tables' order, because
+# routes return their rows as dicts and the key order is part of the API's JSON.
+
+class SipLog(Base):
+    """One row per SIP instalment applied to a holding (sip.py)."""
+    __tablename__ = "sip_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    holding_id: Mapped[Optional[int]]
+    holding_name: Mapped[Optional[str]]
+    month: Mapped[Optional[str]]
+    sip_date: Mapped[Optional[str]]
+    amount: Mapped[Optional[float]]
+    applied_at: Mapped[Optional[str]]
+    user_id: Mapped[Optional[int]] = mapped_column(default=1)
+
+
+class LedgerTransaction(Base):
+    """Investment ledger: buys, sells, dividends and opening balances (ledger.py)."""
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    holding_id: Mapped[Optional[int]]
+    name: Mapped[Optional[str]] = mapped_column(default="")
+    tx_date: Mapped[str]
+    kind: Mapped[str]
+    qty: Mapped[Optional[float]] = mapped_column(default=0)
+    price: Mapped[Optional[float]] = mapped_column(default=0)
+    amount: Mapped[Optional[float]] = mapped_column(default=0)
+    fees: Mapped[Optional[float]] = mapped_column(default=0)
+    realized: Mapped[Optional[float]] = mapped_column(default=0)
+    note: Mapped[Optional[str]] = mapped_column(default="")
+    source: Mapped[Optional[str]] = mapped_column(default="manual")
+    applied: Mapped[Optional[int]] = mapped_column(default=0)
+    user_id: Mapped[Optional[int]] = mapped_column(default=1)
+
+
+class PriceRun(Base):
+    """Log of price refreshes (prices.py)."""
+    __tablename__ = "price_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ran_at: Mapped[Optional[str]]
+    ok: Mapped[Optional[int]]
+    updated: Mapped[Optional[int]]
+    failed: Mapped[Optional[int]]
+    detail: Mapped[Optional[str]]
+
+
+class PriceHistory(Base):
+    """Closing price / NAV per holding per day."""
+    __tablename__ = "price_history"
+
+    holding_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    price_date: Mapped[str] = mapped_column(primary_key=True)
+    price: Mapped[Optional[float]]
+
+
+class AppPref(Base):
+    """Small app-wide key/value settings (e.g. the Holdings table's column layout)."""
+    __tablename__ = "app_prefs"
+
+    key: Mapped[str] = mapped_column(primary_key=True)
+    value: Mapped[str] = mapped_column(default="")

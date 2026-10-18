@@ -1,6 +1,6 @@
 """The "when to pay" engine. Every expected value here is worked out by hand in the test,
 not taken from the code, so a wrong formula cannot agree with itself."""
-from datetime import date, timedelta
+from datetime import date
 
 import pytest
 

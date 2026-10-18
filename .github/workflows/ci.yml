@@ -7,6 +7,20 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: spendlens
+          POSTGRES_PASSWORD: spendlens
+          POSTGRES_DB: spendlens_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U spendlens -d spendlens_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -17,7 +31,13 @@ jobs:
       - run: pip install -r spendlens/requirements-dev.txt
 
       # The suite seeds its own database (SPENDLENS_DB), so no data file is needed here.
-      - name: pytest
+      - name: pytest (SQLite)
+        run: python -m pytest
+
+      # The same suite on PostgreSQL: conftest rebuilds the schema there with Alembic.
+      - name: pytest (PostgreSQL)
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://spendlens:spendlens@localhost:5432/spendlens_test
         run: python -m pytest
 
       - uses: pnpm/action-setup@v4

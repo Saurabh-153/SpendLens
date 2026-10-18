@@ -85,10 +85,12 @@ def _seed(db, card_id):
     if any(C.get_card(db, i).get("perks_seeded") for i in fam):
         return
     for n, p in enumerate(SEEDS.get(card["profile"], [])):
-        db.execute("INSERT INTO card_perks (card_id, kind, title, detail, value_yr, source, checked, sort) VALUES (?,?,?,?,?,?,0,?)",
-                   (card_id, p["kind"], p["title"], p["detail"], p["value_yr"], p["source"], n))
+        C.query(db, """INSERT INTO card_perks (card_id, kind, title, detail, value_yr, source, checked, sort)
+                      VALUES (:card_id, :kind, :title, :detail, :value_yr, :source, 0, :sort)""",
+               card_id=card_id, kind=p["kind"], title=p["title"], detail=p["detail"], value_yr=p["value_yr"],
+               source=p["source"], sort=n)
     for i in fam:
-        db.execute("UPDATE cards SET perks_seeded=1 WHERE id=?", (i,))
+        C.query(db, "UPDATE cards SET perks_seeded=1 WHERE id=:id", id=i)
     db.commit()
 
 
@@ -96,8 +98,7 @@ def list_perks(db, card_id):
     """The card's entries, grouped by kind in a fixed order."""
     _seed(db, card_id)
     fam = _members(db, card_id)
-    q = ",".join("?" * len(fam))
-    rows = [dict(r) for r in db.execute(f"SELECT * FROM card_perks WHERE card_id IN ({q}) ORDER BY sort, id", fam)]
+    rows = [dict(r) for r in C.query(db, "SELECT * FROM card_perks WHERE card_id IN :ids ORDER BY sort, id", ids=fam).mappings()]
     for r in rows:
         r["checked"] = bool(r["checked"])
     return {"kinds": [{"id": k, "label": l} for k, l in KINDS], "perks": rows,
@@ -136,16 +137,18 @@ def add_perk(db, card_id, data):
         raise KeyError("card")
     _seed(db, card_id)
     f = _clean({"kind": "other", "detail": "", "source": "Added by you", "value_yr": 0, **data, "checked": data.get("checked", True)}, partial=False)
-    top = db.execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM card_perks WHERE card_id IN (%s)" % ",".join("?" * len(_members(db, card_id))),
-                     _members(db, card_id)).fetchone()[0]
-    db.execute("INSERT INTO card_perks (card_id, kind, title, detail, value_yr, source, checked, sort) VALUES (?,?,?,?,?,?,?,?)",
-               (card_id, f["kind"], f["title"], f["detail"], f["value_yr"], f["source"], f["checked"], top))
+    top = C.query(db, "SELECT COALESCE(MAX(sort), -1) + 1 FROM card_perks WHERE card_id IN :ids",
+                 ids=_members(db, card_id)).scalar_one()
+    C.query(db, """INSERT INTO card_perks (card_id, kind, title, detail, value_yr, source, checked, sort)
+                  VALUES (:card_id, :kind, :title, :detail, :value_yr, :source, :checked, :sort)""",
+           card_id=card_id, kind=f["kind"], title=f["title"], detail=f["detail"], value_yr=f["value_yr"],
+           source=f["source"], checked=f["checked"], sort=top)
     db.commit()
     return list_perks(db, card_id)
 
 
 def update_perk(db, perk_id, data):
-    row = db.execute("SELECT * FROM card_perks WHERE id=?", (perk_id,)).fetchone()
+    row = C.query(db, "SELECT * FROM card_perks WHERE id=:id", id=perk_id).mappings().first()
     if not row:
         raise KeyError("perk")
     f = _clean(data, partial=True)
@@ -153,16 +156,17 @@ def update_perk(db, perk_id, data):
         # Rewording an entry yourself counts as checking it, unless the same request says otherwise.
         if "checked" not in f and any(k in f for k in ("title", "detail", "value_yr", "kind")):
             f["checked"] = 1                      # you wrote it yourself, so it is yours
-        db.execute("UPDATE card_perks SET " + ", ".join(f"{k}=?" for k in f) + ", updated=? WHERE id=?",
-                   (*f.values(), date.today().isoformat(), perk_id))
+        # `f`'s keys come from _clean's fixed set of column names, never from the request.
+        C.query(db, "UPDATE card_perks SET " + ", ".join(f"{k}=:{k}" for k in f) + ", updated=:updated WHERE id=:id",
+               **f, updated=date.today().isoformat(), id=perk_id)
         db.commit()
     return list_perks(db, row["card_id"])
 
 
 def delete_perk(db, perk_id):
-    row = db.execute("SELECT card_id FROM card_perks WHERE id=?", (perk_id,)).fetchone()
-    if not row:
+    card_id = C.query(db, "SELECT card_id FROM card_perks WHERE id=:id", id=perk_id).scalar()
+    if card_id is None:
         raise KeyError("perk")
-    db.execute("DELETE FROM card_perks WHERE id=?", (perk_id,))
+    C.query(db, "DELETE FROM card_perks WHERE id=:id", id=perk_id)
     db.commit()
-    return list_perks(db, row["card_id"])
+    return list_perks(db, card_id)

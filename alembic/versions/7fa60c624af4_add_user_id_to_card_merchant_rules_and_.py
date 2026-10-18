@@ -21,10 +21,11 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # Both tables already have a plain integer id primary key, so (unlike the previous two
     # revisions) this is a straight add-column — no primary key rebuild needed.
-    with op.batch_alter_table("card_accounts") as batch_op:
-        batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
-    with op.batch_alter_table("card_merchant_rules") as batch_op:
-        batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
+    inspector = sa.inspect(op.get_bind())
+    for table in ("card_accounts", "card_merchant_rules"):
+        if "user_id" not in {c["name"] for c in inspector.get_columns(table)}:  # the baseline may have built it already
+            with op.batch_alter_table(table) as batch_op:
+                batch_op.add_column(sa.Column("user_id", sa.Integer(), nullable=False, server_default="1"))
 
 
 def downgrade() -> None:
