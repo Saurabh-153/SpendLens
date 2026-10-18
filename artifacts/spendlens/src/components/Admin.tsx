@@ -4,6 +4,7 @@ import { label } from './ui'
 import Categories from './admin/Categories'
 import Subcategories from './admin/Subcategories'
 import Targets from './admin/Targets'
+import Reminders from './admin/Reminders'
 import HoldingGroups from './admin/HoldingGroups'
 import HoldingColumns from './admin/HoldingColumns'
 import PortfolioPlan from './admin/PortfolioPlan'
@@ -22,6 +23,7 @@ const ADMIN_TOOLS: AdminTool[] = [
   { group: 'Expense', id: 'categories', label: 'Categories & Sub-categories', icon: '🗂️', component: Categories },
   { group: 'Expense', id: 'subcategories', label: 'Review entries', icon: '🔖', component: Subcategories, hidden: true },   // not in the menu; opened by the Expense page's "need a sub-category" button
   { group: 'Expense', id: 'targets', label: 'Targets & Budget', icon: '🎯', component: Targets },
+  { group: 'Expense', id: 'reminders', label: 'Reminders', icon: '🔔', component: Reminders },
   { group: 'Portfolio', id: 'holding-groups', label: 'Holding groups', icon: '🧺', component: HoldingGroups },
   { group: 'Portfolio', id: 'holding-columns', label: 'Holdings columns', icon: '🧱', component: HoldingColumns },
   { group: 'Portfolio', id: 'portfolio-plan', label: 'Goals & targets', icon: '🏁', component: PortfolioPlan },

@@ -1,9 +1,10 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { addExpense, getGrid, getReview, setCellEntries, setRange, type GridCategory, type GridEntry, type MonthlyGrid } from '../api'
 import { currentMonth, shiftMonth } from '../months'
 import { T, fmt, fmtFull } from '../theme'
 import { AddDialog, CellEditor } from './ExpenseDialogs'
 import MonthPicker from './MonthPicker'
+import ReminderCalendar from './ReminderCalendar'
 import { btn, card, input } from './ui'
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -36,7 +37,9 @@ const toLine = (e: GridEntry) => ({ id: e.id, subcategory_id: e.subcategory_id, 
 /** A day's entries that belong to other sub-categories than `subId`, as lines to send back unchanged. */
 const othersOf = (entries: GridEntry[], subId: number | null) => entries.filter(e => e.subcategory_id !== subId).map(toLine)
 
-export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', tool: string, tab?: string) => void }) {
+type ExpenseNav = (page: 'admin', tool: string, tab?: string) => void
+
+function ExpenseSheet({ onNavigate, headerExtra }: { onNavigate: ExpenseNav; headerExtra?: ReactNode }) {
   const [month, setMonth] = useState(currentMonth)
   const [grid, setGrid] = useState<MonthlyGrid | null>(null)
   const [error, setError] = useState('')
@@ -234,6 +237,7 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
   return (
     <div style={{ padding: '20px 24px' }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
+        {headerExtra}
         <MonthPicker month={month} onChange={m => { setMonth(m); setSel(null) }} />
         <div style={{ flex: 1 }} />
         {error && <span style={{ color: T.negative, fontSize: 12 }}>{error}</span>}
@@ -388,4 +392,29 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
       <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: 16, fontWeight: 600, color: color ?? T.text }}>{value}</div>
     </div>
   )
+}
+
+const VIEW_KEY = 'spendlens.expenseView'
+
+/** Sheet | Calendar toggle. Only the chosen view is mounted, so the sheet's keyboard shortcuts are off while the calendar shows. */
+export default function Expense({ onNavigate }: { onNavigate: ExpenseNav }) {
+  const [view, setView] = useState<'sheet' | 'calendar'>(() => {
+    try { return localStorage.getItem(VIEW_KEY) === 'calendar' ? 'calendar' : 'sheet' } catch { return 'sheet' }
+  })
+  const choose = (v: 'sheet' | 'calendar') => {
+    setView(v)
+    try { localStorage.setItem(VIEW_KEY, v) } catch { /* storage unavailable */ }
+  }
+  const toggle = (
+    <div role="tablist" aria-label="Expense view" style={{ display: 'flex', gap: 2, background: T.surface2, borderRadius: 8, padding: 3 }}>
+      {(['sheet', 'calendar'] as const).map(v => (
+        <button key={v} role="tab" aria-selected={view === v} onClick={() => choose(v)}
+          style={{ border: 'none', cursor: 'pointer', borderRadius: 6, padding: '5px 12px', fontSize: 13, fontWeight: 500,
+            background: view === v ? T.surface : 'transparent', color: view === v ? T.text : T.muted }}>
+          {v === 'sheet' ? 'Sheet' : 'Calendar'}
+        </button>
+      ))}
+    </div>
+  )
+  return view === 'sheet' ? <ExpenseSheet onNavigate={onNavigate} headerExtra={toggle} /> : <ReminderCalendar headerExtra={toggle} />
 }

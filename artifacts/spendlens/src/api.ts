@@ -52,6 +52,12 @@ export interface Holding {
 }
 export type HoldingInput = Pick<Holding, 'name' | 'ticker' | 'asset_type' | 'sector' | 'qty' | 'buy_price' | 'cmp' | 'notes' | 'tags' | 'exposure' | 'grp' | 'sip_amount' | 'sip_day' | 'maturity' | 'rate' | 'start_date' | 'compounding' | 'rd' | 'credits' | 'manual'>
 
+export interface DbStatus {
+  primary: 'postgresql' | 'sqlite'; mode: 'normal' | 'read-only-fallback'
+  mirror: { path_name: string; updated_at: string | null; last_error: string | null } | null
+}
+export const getStatus = () => req<DbStatus>('/status')
+
 export const getGrid = (month: string) => req<MonthlyGrid>(`/expenses/monthly-grid?month=${month}`)
 export interface ForecastRange { p10: number; p50: number; p90: number }
 export interface ForecastCategory extends ForecastRange {
@@ -119,9 +125,7 @@ export const createSubcategory = (category_id: number, name: string, start_month
 export const updateSubcategory = (id: number, name: string) => req<Subcategory>(`/subcategories/${id}`, 'PUT', { name })
 export const archiveSubcategory = (id: number, from_month: string) =>
   req<Subcategory & { months_with_data_after: number }>(`/subcategories/${id}/archive`, 'POST', { from_month })
-export const restoreSubcategory = (id: number) => req<Subcategory>(`/subcategories/${id}/restore`, 'POST')
 export const deleteSubcategory = (id: number) => req(`/subcategories/${id}`, 'DELETE')
-export const reorderSubcategories = (ids: number[]) => req('/subcategories/reorder', 'PUT', { ids })
 export const getReview = () => req<ReviewItem[]>('/subcategories/review')
 export const mapReview = (category_id: number, note: string, subcategory_id: number) =>
   req<{ updated: number }>('/subcategories/review/map', 'POST', { category_id, note, subcategory_id })
@@ -412,3 +416,84 @@ export const getPerks = (cardId: number) => req<Perks>(`/cards/${cardId}/perks`)
 export const addPerk = (cardId: number, body: Partial<Perk>) => req<Perks>(`/cards/${cardId}/perks`, 'POST', body)
 export const updatePerk = (id: number, body: Partial<Perk>) => req<Perks>(`/cards/perks/${id}`, 'PATCH', body)
 export const deletePerk = (id: number) => req<Perks>(`/cards/perks/${id}`, 'DELETE')
+
+export interface ReminderCategory { id: number; name: string; color: string; kind: 'card' | 'sip' | null; sort_order: number; reminder_count: number }
+export type ReminderRepeat = 'monthly' | 'quarterly' | 'yearly'
+export interface Reminder {
+  id: number; category_id: number; name: string; amount: number; day: number; repeat: ReminderRepeat; month: number | null
+  enabled: boolean; note: string; expense_category_id: number | null; expense_subcategory_id: number | null; source_key: string | null
+}
+export type ReminderInput = Omit<Reminder, 'id'>
+export type OccurrenceState = 'done' | 'missing' | 'up' | 'info' | 'unlinked'
+export interface SipSource { holding_id: number; name: string; label: string; amount: number; day: number }
+export interface ReminderOccurrence {
+  key: string; reminder_id: number | null; category_id: number; name: string; amount: number; day: number
+  state: OccurrenceState; note: string; auto: boolean; estimated: boolean
+  sources?: SipSource[]   // SIP groups only: the holdings behind the occurrence
+  moved?: boolean         // this month's date was moved away from the reminder's usual day
+}
+export interface Holiday { date: string; day: number; country: 'IN' | 'US'; name: string }
+export interface Vacation { id: number; name: string; start_date: string; end_date: string; color: string }
+export type VacationInput = Omit<Vacation, 'id'>
+export interface ReminderCalendar {
+  month: string; today: string; occurrences: ReminderOccurrence[]; logged_days: number[]; nudge: { on: boolean; time: string }
+  holidays?: Holiday[]; vacations?: Vacation[]   // vacations overlapping the month, with their full (unclipped) dates
+  trackers?: CalendarTracker[]
+}
+export interface ReminderSuggestion {
+  key: string; name: string; category_id: number; subcategory_id: number | null; day: number; amount: number
+  min_amount: number; max_amount: number; months: number; window: string; last_seen: string
+}
+export interface ReminderSettings { nudge_on: boolean; nudge_time: string }
+
+export const getReminderCategories = () => req<ReminderCategory[]>('/reminder-categories')
+export const createReminderCategory = (c: { name: string; color: string }) => req<ReminderCategory>('/reminder-categories', 'POST', c)
+export const updateReminderCategory = (id: number, c: { name?: string; color?: string }) => req<ReminderCategory>(`/reminder-categories/${id}`, 'PUT', c)
+export const deleteReminderCategory = (id: number, opts: { move_to?: number; delete_reminders?: boolean } = {}) => {
+  const q = new URLSearchParams()
+  if (opts.move_to) q.set('move_to', String(opts.move_to))
+  if (opts.delete_reminders) q.set('delete_reminders', 'true')
+  return req(`/reminder-categories/${id}${q.size ? `?${q}` : ''}`, 'DELETE')
+}
+export const getReminders = () => req<Reminder[]>('/reminders')
+export const createReminder = (r: ReminderInput) => req<Reminder>('/reminders', 'POST', r)
+export const updateReminder = (id: number, r: Partial<ReminderInput>) => req<Reminder>(`/reminders/${id}`, 'PUT', r)
+export const deleteReminder = (id: number) => req(`/reminders/${id}`, 'DELETE')
+export const getReminderCalendar = (month: string) => req<ReminderCalendar>(`/reminders/calendar?month=${month}`)
+export const getReminderSuggestions = () => req<ReminderSuggestion[]>('/reminders/suggestions')
+export const getReminderSettings = () => req<ReminderSettings>('/reminders/settings')
+export interface SipVisibility { holding_id: number; name: string; label: string; amount: number; day: number; show: boolean }
+export const getReminderSips = () => req<SipVisibility[]>('/reminders/sips')
+export const setReminderSipVisibility = (holdingId: number, show: boolean) => req<SipVisibility>(`/reminders/sips/${holdingId}`, 'PUT', { show })
+export const updateReminderSettings = (s: Partial<ReminderSettings>) => req<ReminderSettings>('/reminders/settings', 'PUT', s)
+
+export const getVacations = () => req<Vacation[]>('/vacations')
+export const createVacation = (v: VacationInput) => req<Vacation>('/vacations', 'POST', v)
+export const updateVacation = (id: number, v: Partial<VacationInput>) => req<Vacation>(`/vacations/${id}`, 'PUT', v)
+export const deleteVacation = (id: number) => req(`/vacations/${id}`, 'DELETE')
+
+export type TrackerPause = 'vacation' | 'IN' | 'US'
+export interface TrackerCostLink { category_id: number; subcategory_id: number | null }
+export interface Tracker {
+  id: number; name: string; color: string; target_per_week: number; weekdays: number[]   // 0 = Monday
+  pause_on: TrackerPause[]; bill_reminder_id: number | null; cost_links: TrackerCostLink[]; sort_order: number
+}
+export type TrackerInput = Omit<Tracker, 'id' | 'sort_order'>
+export interface TrackerWeek { start_day: number; end_day: number; done: number; goal: number }
+export interface TrackerKpi {
+  count: number; month_goal: number; expected_by_today: number; projected: number; status: 'good' | 'warn' | 'bad'
+  this_week: { done: number; goal: number }; weeks_on_target: number; complete_weeks: number; week_streak: number; per_week: TrackerWeek[]
+  cost: null | { avg_on: number; avg_off: number; n_on: number; n_off: number; diff: number }
+  cost_per_visit: null | { bill_name: string; amount: number; per_visit: number }
+}
+export interface CalendarTracker {
+  id: number; name: string; color: string; target_per_week: number; weekdays: number[]; pause_on: TrackerPause[]
+  done_days: number[]; scheduled_days: number[]; kpi: TrackerKpi
+}
+export const getTrackers = () => req<Tracker[]>('/trackers')
+export const createTracker = (t: TrackerInput) => req<Tracker>('/trackers', 'POST', t)
+export const updateTracker = (id: number, t: Partial<TrackerInput>) => req<Tracker>(`/trackers/${id}`, 'PUT', t)
+export const deleteTracker = (id: number) => req(`/trackers/${id}`, 'DELETE')
+export const reorderTrackers = (ids: number[]) => req('/trackers/reorder', 'PUT', { ids })
+export const setTrackerDay = (id: number, date: string, done: boolean) => req(`/trackers/${id}/days/${date}`, 'PUT', { done })
+export const moveReminder = (id: number, m: { month: string; day: number; scope: 'all' | 'month' }) => req<Reminder>(`/reminders/${id}/move`, 'PUT', m)
