@@ -255,9 +255,29 @@ Notes:
 
 URL params: `?page=expense|holdings|ledger|cards|dashboard|admin`, `&tab=portfolio`, `&tool=categories|subcategories|targets|holding-groups|portfolio-plan|prices`.
 
+### PostgreSQL as the main database, with a SQLite mirror
+
+With `DATABASE_URL` pointing at PostgreSQL the app uses it as the main database. `.\run-api.ps1` reads it from the
+git-ignored `.env.local`; without that file (or with `DATABASE_URL` unset) the app runs on SQLite exactly as before,
+and none of the following applies.
+
+- **Mirror.** The app keeps a complete SQLite copy of PostgreSQL at `spendlens/spendlens_v2.db` (the file the app
+  used before; change it with `SPENDLENS_MIRROR`). It is rebuilt about 10 s after the last save, every 15 minutes,
+  and when the server stops with Ctrl+C. Each refresh builds a new file, verifies it table by table and only then
+  replaces the old one, so the mirror is always a whole, checked copy. The first refresh keeps the file that was
+  there before as `spendlens_v2.pre-postgres.bak`. When and whether the last refresh worked is in
+  `spendlens_v2.db.mirror.json`, and in `GET /spendlens/api/status`.
+- **Read-only fallback.** If PostgreSQL can't be reached (at start-up within 3 s, or later: the app checks every 30 s
+  and on any lost connection), the app switches to the mirror, read-only. Every page shows a banner saying so;
+  viewing works, saving is refused with a message, and background jobs that write (due SIPs, snapshots, price
+  refreshes) wait. When PostgreSQL answers again the app switches back by itself and refreshes the mirror. Anything
+  you could not save during the outage has to be entered again: nothing is queued.
+- **Back to SQLite for good.** Stop the server, rename `.env.local`, start it again: it then uses the mirror file as
+  its database. Copying SQLite into PostgreSQL again: `python spendlens\tools\copy_to_postgres.py --source <file> --target <url>`.
+
 ### Stop the server
 
-Press Ctrl+C in its terminal. If it was started hidden or the terminal is gone, free the port with:
+Press Ctrl+C in its terminal (with PostgreSQL this also takes a last mirror). If it was started hidden or the terminal is gone, free the port with:
 
 ```powershell
 Get-NetTCPConnection -LocalPort 5000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
@@ -279,31 +299,47 @@ python -m pytest                                 # or: pnpm run test
 ```
 
 **The suite never touches your data.** `tests/conftest.py` sets `SPENDLENS_DB` to a
-throwaway file before anything is imported, and `database.DB_PATH` honours that
-variable (leave it unset for normal use). Tests that need realistic data get a *copy*
-of `spendlens_v2.db` and are skipped if the file is not there.
+throwaway file before anything is imported, and builds it with Alembic exactly as
+`app.py` does. Tests that need realistic data get a *copy* of `spendlens_v2.db` and are
+skipped if the file is not there.
 
-- `tests/test_migrations.py` – the migration chain is applied once, is idempotent, backs
-  up first, and does not change your expense data.
+**Running the suite on PostgreSQL.** Point `TEST_DATABASE_URL` at an empty database kept
+for tests (its name must end in `_test`; it is wiped at the start of every run), or put
+the URL in the git-ignored `.env.local` and set `SPENDLENS_TEST_PG=1`:
+
+```powershell
+$env:SPENDLENS_TEST_PG = "1"; python -m pytest; Remove-Item Env:SPENDLENS_TEST_PG
+# or: $env:TEST_DATABASE_URL = "postgresql+psycopg://user:pass@localhost:5433/spendlens_test"
+```
+
+CI runs the suite twice: on SQLite, and on a PostgreSQL 16 service container. Tests about
+the SQLite file itself (the legacy migration chain, copies of the real file) skip on
+PostgreSQL.
+
+- `tests/test_migrations.py` – the legacy migration chain is applied once, is idempotent,
+  backs up first, and does not change your expense data.
 - `tests/test_api_shape.py` – every read endpoint answers 200 and still carries the keys
   the UI reads. When a key here changes, `src/api.ts` changes with it.
 - `tests/test_mix_math.py` – the SIP-mix engine's invariants: the mix equals the target
   at the reach month, the forecast matches a brute-force loop, no SIP share is ever
   negative, and an unreachable target is reported rather than faked.
 
-**Migrations — two systems, one path.** Schema changes used to be numbered steps in
-`MIGRATIONS` (`database.py`), applied once at start-up and recorded in
-`schema_migrations`. That system still exists and still runs first on every start-up
-(`init_db()`, called from `app.py`) — it's the baseline shape every table starts in,
-including a few (`portfolio_snapshots`, `portfolio_goals`, `transactions`,
-`portfolio_plan`) that are actually created lazily on first use rather than by
-`database.py` itself. **New schema changes go through Alembic instead** (`alembic/`,
-`spendlens/db/models/`): `app.py` runs `init_db()` then
-`spendlens/db/migrate.py`'s `upgrade_head()` immediately after, so every
-database — fresh or live — reaches the exact same final schema through the exact same
-two-step path. `tests/conftest.py`'s `seeded_db` fixture runs the identical sequence, so
-the test suite now exercises real start-up behaviour rather than `database.py`'s
-migrations in isolation.
+**Alembic owns the schema.** `app.py` calls `spendlens/db/migrate.py`'s
+`prepare_database()`, which runs `alembic upgrade head`. On an empty database (a new
+SQLite file, or PostgreSQL) the baseline revision `218d401380ff` creates every table that
+predates Alembic and the starter data (`spendlens/db/seed.py`: categories, a sample month,
+sub-category rules, the first card); later revisions build on that. On your existing
+SQLite file it changes nothing. The only other path is an old SQLite file from before
+Alembic (tables but no `alembic_version`): `database.init_db()` first brings it up to the
+last hand-rolled schema (the numbered `MIGRATIONS` in `database.py`), then Alembic adopts
+it. That legacy path is the only code that still uses the `sqlite3` library.
+
+The app uses SQLite (`spendlens/spendlens_v2.db`) unless `DATABASE_URL` is set, for
+example `postgresql+psycopg://user:pass@localhost:5433/spendlens`. Write migrations so
+they run on both: use `db/ddl.py`'s helpers for timestamp defaults (`now_text`) and to
+move PostgreSQL's id sequences after explicit-id inserts, `sa.true()` / `sa.false()` for
+boolean defaults, and guard work an earlier revision or the baseline may already have
+done (see `459d2bc3ff86` and `7fa60c624af4`).
 
 To add a schema change: write a SQLAlchemy model (or extend one) in
 `spendlens/db/models/`, then from the repo root:
@@ -315,21 +351,8 @@ To add a schema change: write a SQLAlchemy model (or extend one) in
 ```
 
 Test the migration on a *scratch copy* of `spendlens_v2.db` first — upgrade, downgrade,
-upgrade again — before ever running it against the real file. A table that's created
-lazily (by `ensure()` in `portfolio.py`/`ledger.py`, not by `database.py`'s own startup
-code) may not exist yet when Alembic runs against a brand-new database; guard an `ALTER`
-against that the way `0a3ec7a2c0e3`'s migration does (check `inspector.get_table_names()`
-and `CREATE` directly in the final shape if the table isn't there yet, instead of only
-ever `ALTER`ing).
-
-**sqlite3 and SQLAlchemy currently coexist.** Most routes still read/write through raw
-`sqlite3` (`routes/_common.py`'s `get_db_dep`); the subset of each route file's *own*
-direct queries against a modeled table (not inside `portfolio.py`/`prices.py`/`sip.py`/
-`ledger.py`/`cards.py`/`card_perks.py`/`card_advisor.py`, which still take the raw
-connection they're built for) goes through a SQLAlchemy `Session`
-(`db/engine.py`'s `get_session`) instead. `Expense`-table writes and the heavier
-multi-table reporting joins (`get_dashboard`, `get_monthly_grid`, `get_expenses`,
-`subcategory_review`) are still raw SQL as of this writing.
+upgrade again — and on the PostgreSQL test database, before ever running it against the
+real file.
 
 ## Cards (credit cards)
 

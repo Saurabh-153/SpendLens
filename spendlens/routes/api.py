@@ -11,10 +11,16 @@ from fastapi import APIRouter
 from .expense_routes import router as expense_router
 from .investing_routes import router as investing_router, refresh_and_snapshot
 from .card_routes import router as cards_router
+from .reminder_routes import router as reminders_router
+from .tracker_routes import router as trackers_router
+from .status_routes import router as status_router
 
 router = APIRouter()
 router.include_router(expense_router)
 router.include_router(investing_router)
 router.include_router(cards_router)
+router.include_router(reminders_router)
+router.include_router(trackers_router)
+router.include_router(status_router)
 
 __all__ = ["router", "refresh_and_snapshot"]

@@ -7,13 +7,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 sys.path.insert(0, os.path.dirname(__file__))
-from database import init_db
 from routes.api import router, refresh_and_snapshot
 from prices import start_scheduler
-from db.migrate import upgrade_head
+from db import failover
 
-init_db()
-upgrade_head()  # applies Alembic's migrations on top of init_db()'s baseline shape - see db/migrate.py
+failover.startup()  # Alembic builds or upgrades the schema (db/migrate.py); on PostgreSQL also the SQLite mirror
 
 app = FastAPI(title="SpendLens API")
 
@@ -29,6 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+failover.install(app)  # read-only guard while PostgreSQL is down; see db/failover.py
 app.include_router(router)
 start_scheduler(refresh_and_snapshot)  # daily equity / NAV update after market close, with catch-up
 

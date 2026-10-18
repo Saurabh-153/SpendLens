@@ -1,6 +1,7 @@
 import { useState, useSyncExternalStore } from 'react'
 import Admin from './components/Admin'
 import Cards from './components/Cards'
+import DatabaseBanner from './components/DatabaseBanner'
 import Dashboard from './components/Dashboard'
 import Expense from './components/Expense'
 import Holdings from './components/Holdings'
@@ -54,6 +55,7 @@ export default function App() {
           </svg>
         </button>
       </nav>
+      <DatabaseBanner />
       {page === 'expense' && <Expense onNavigate={go} />}
       {page === 'holdings' && <Holdings />}
       {page === 'ledger' && <Ledger />}
