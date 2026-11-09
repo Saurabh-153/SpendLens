@@ -42,7 +42,7 @@ jobs:
       # The same toolchain as ci.yml, so Claude can run the tests and the repo's .claude hooks work here
       # (they run on `python`, and the Stop hook runs the tests nearest each change). SQLite only: no
       # PostgreSQL service here; CI runs that on the PR.
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
           cache: pip
