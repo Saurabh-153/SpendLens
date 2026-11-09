@@ -3,7 +3,7 @@ uvicorn[standard]>=0.30.0
 pypdf>=6.19           # reading password-protected credit-card statements
 python-multipart>=0.0.20  # (0.0.18+ fixes CVE-2024-53981) statement file uploads
 anthropic>=0.40       # optional: Claude fallback for unrecognised statement formats (needs ANTHROPIC_API_KEY)
-openpyxl>=3.1         # reading Excel activity exports (American Express) and MF portfolio disclosures
+openpyxl>=3.1.5         # reading Excel activity exports (American Express) and MF portfolio disclosures
 xlrd==2.0.1           # old binary .xls MF portfolio disclosures (some AMC months are published that way)
 sqlalchemy>=2.0       # ORM layer; backs onto SQLite now, Postgres later via DATABASE_URL
 alembic>=1.13         # schema migrations, replaces the hand-rolled MIGRATIONS list in database.py
