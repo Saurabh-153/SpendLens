@@ -1,16 +1,17 @@
 # SpendLens
 
-Personal expense and portfolio tracker (₹, lakh/crore formatting). FastAPI backend on PostgreSQL with a verified
-SQLite copy (or SQLite alone), React + Vite frontend.
+Personal expense, portfolio and credit-card tracker (₹, lakh/crore formatting) for one household or several people.
+FastAPI backend on PostgreSQL with a verified SQLite copy (or SQLite alone), React 19 + Vite frontend, sign-in with
+per-user data and per-module access.
 
-- **Expense** – month grid per category/day with keyboard-first entry, one *Add expense* dialog (single day or a range like `5-12`), sub-categories you can type into directly, month navigation.
+- **Expense** – month grid per category/day with keyboard-first entry, one *Add expense* dialog (single day or a range like `5-12`), sub-categories you can type into directly, month navigation. The spending dashboard sits on the same page: KPI tiles above the sheet (spent vs budget and pace, left to spend, projected month-end, savings rate) and the month's insights below it (where it went, pace, 12 months, forecast).
 - **Calendar** (Expense › Calendar) – reminders for bills and EMIs (suggested from your history), card statement and due dates, SIPs, India and US public holidays, vacations, tick-box day trackers (gym, office...) with KPIs, drag-and-drop to move a reminder, and an `.ics` feed for phone calendars.
-- **Holdings** – grouped portfolio (net worth, gain, allocation, insights, sortable by value, invested, gain ₹ or gain %), click a row to edit, CSV export.
-- **MF Analysis** (preview) – your mutual funds judged month by month from AMC factsheets: scorecard (returns vs benchmark, rolling consistency, Sharpe / Sortino, downside and upside capture, drawdown, costs, concentration), trends, anomalies, overlap between your funds, factsheet coverage and a guide to every parameter. The fund list is your MF holdings; the metrics are sample data until factsheet import (`factsheets/YYYY-MM/<AMC>.pdf`) is built.
+- **Holdings** – three tabs: *Holdings & Returns* (grouped portfolio, net worth, gain, XIRR, worth-a-look notes, best and worst, concentration, CSV export), *Asset Mix & Rebalancing* (Equity / Gold / Debt vs target, today vs target, risk, the SIP split that reaches the target) and *Goals & Forecast* (net-worth history, goal odds from a Monte Carlo simulation, corpus and commitments).
+- **MF Analysis** – your mutual funds judged month by month from the AMC factsheets and portfolio disclosures stored in the database: scorecard (returns vs benchmark, Sharpe, beta, costs, concentration), *Factsheet analysis* (what your funds are buying and selling), trends, anomalies (manager change, TER up, cash spike, mandate drift…), overlap between your funds, a *Morningstar check* that cross-checks the AMC figures against Morningstar reports (with the report PDF shown inline), and a guide to every parameter. See *MF Analysis* below for loading data.
 - **Ledger** – the stock ledger built from broker files (Zerodha Console tradebooks, dividend statements and the holdings statement) for one or more demat accounts: dividends per stock by quarter and financial year, realised gains (FIFO), XIRR per stock and overall (with and without dividends), held and exited stocks, corporate actions, and an audit that reconciles every share count. A Refresh button fetches prices, splits and newer dividends from Yahoo.
-- **Dashboard** – Expense dashboard (spend vs budget and pace, projected month-end, where it went with targets and sub-categories, 12-month trend, forecast) and Portfolio dashboard (KPIs, goal odds with a simulated range, allocation vs target, risk, performers, history).
 - **Cards** – credit-card cashback dashboard: statement import, what each card earned vs what it could have, merchant breakdown, fee-waiver and utilisation meters, and the spend worth moving. See [CREDIT_CARDS.md](CREDIT_CARDS.md).
-- **Admin** – categories and sub-categories, targets and budget, reminders, trackers and vacations, holding groups, goals and target allocation, daily prices, and **Database** (which database is the main one, and the switch between PostgreSQL and SQLite).
+- **Sign-in and access** – every user has their own data. An admin creates users and switches modules (Expense, Holdings + MF Analysis, Ledger, Cards) on per user; a user can request a locked module and the admin approves it. Password change, an admin reset and a local-only *Forgot password?* with a console code. See *Sign-in, password reset and network access* below.
+- **Admin** – categories and sub-categories, targets and budget, reminders, trackers and vacations, holding groups and columns, goals and target allocation, daily prices, appearance, and (admins only) **Users & modules**, **Access requests** and **Database** (which database is the main one, and the switch between PostgreSQL and SQLite).
 
 Where this is going: [ROADMAP.md](ROADMAP.md) (phases, and the redundancies to remove
 first), [CREDIT_CARDS.md](CREDIT_CARDS.md) (the planned credit-card profit module) and
@@ -21,16 +22,28 @@ first), [CREDIT_CARDS.md](CREDIT_CARDS.md) (the planned credit-card profit modul
 ```
 ExpenseTrack/
 ├── README.md                    this file
-├── ROADMAP.md                   product roadmap: phases, redundancy register
-├── CREDIT_CARDS.md              planned credit-card profit module
-├── plan/                                             forecasting / ML roadmap (Phase A done, B and C planned)
-├── package.json                 pnpm workspace scripts (dev, build, typecheck)
+├── CLAUDE.md                    guidance for Claude Code: commands, architecture, rules
+├── DATA_MODEL.md                tables, relationships and modelling notes
+├── ROADMAP.md, CREDIT_CARDS.md  product roadmap; the credit-card module
+├── plan/                        forecasting / ML, scale, monetization, Telegram bot and agent plans
+├── package.json                 pnpm workspace scripts (dev, build, typecheck, test, check)
 ├── pnpm-workspace.yaml          workspace + esbuild build-script allowance
 ├── alembic.ini, alembic/        schema migrations (see "Tests and migrations" below)
-├── screenshot/                  source Excel sheet used to import holdings
+├── ruff.toml                    Python lint rules (CI and the edit hook)
+├── run-api.ps1                  starts the API with DATABASE_URL from .env.local
+├── .env.local                   (git-ignored) DATABASE_URL / TEST_DATABASE_URL for PostgreSQL
+├── tradebook/, fund_fact_sheet/ (git-ignored) broker files and MF factsheets waiting to be imported
+├── .github/                     CI (ruff, pytest on SQLite + PostgreSQL, typecheck, build), Claude workflows,
+│                                Dependabot
+├── .claude/                     Claude Code agents, skills (/mf-factsheets, /check-all, ...) and safety hooks
 ├── spendlens/                   BACKEND (Python)
-│   ├── app.py                   FastAPI app, port 5000: reads .env.local, prepares the database
-│   │                            (db/failover.startup), mounts /spendlens/api, serves the built UI
+│   ├── app.py                   FastAPI app, port 5000 on 127.0.0.1: reads .env.local, prepares the database
+│   │                            (db/failover.startup), creates the first admin, mounts /spendlens/api behind
+│   │                            security.py, serves the built UI
+│   ├── auth.py                  sessions, the guard (sign-in + module check per URL), password hashing,
+│   │                            the first admin, the console reset code
+│   ├── security.py              cross-site Origin check, CSP and security headers, sign-in throttles
+│   ├── envlocal.py              DATABASE_URL from .env.local for app.py and the command-line tools
 │   ├── database.py              month helpers, categories_for_month, budget_for_month; init_db() only
 │   │                            adopts a pre-Alembic SQLite file
 │   ├── subcategories.py         sub-category seed, note → sub-category matching rules
@@ -38,57 +51,71 @@ ExpenseTrack/
 │   ├── portfolio.py             portfolio KPIs, snapshots, XIRR, goal Monte Carlo
 │   ├── prices.py                daily equity (Yahoo) and MF (AMFI) prices, scheduler
 │   ├── ledger.py                dated holding flows (SIPs) for the Holdings XIRR KPI
+│   ├── sip.py, accrual.py       SIP application, FD/RD auto valuation
 │   ├── equity.py                stock ledger: replay, dividends, XIRR, reconciliation
 │   ├── equity_import.py         Zerodha tradebook / dividend / holdings file parsing
+│   ├── dividend_agent.py        Ledger Refresh: Yahoo prices, splits and dividends, cross-checked
+│   ├── mf.py                    MF Analysis: payload validation, import, scorecard, buying trend, overlap,
+│   │                            anomalies, Morningstar cross-check
+│   ├── mf_parsers.py            fixed factsheet parsers (Axis, Edelweiss) and the Morningstar report parser
+│   ├── mf_extract.py            command line: inventory, held funds, disclosure / factsheet extraction, validate
 │   ├── import_broker.py         command line: import a folder of broker files, then refresh
-│   ├── dividend_agent.py        Refresh: Yahoo prices, splits and dividends, cross-checked
-│   ├── sip.py, accrual.py       SIP application, FD/RD auto valuation
-│   ├── cards.py                 card import (SBI parser, PARSERS registry, Claude fallback), profiles, earn engine, dashboard
+│   ├── import_mf.py             command line: load extracted factsheet JSON + Morningstar PDFs, delete imported
+│   ├── reset_password.py        command line: reset a user's password on this computer
+│   ├── cards.py                 card import (PARSERS registry, Claude fallback), profiles, earn engine, dashboard
 │   ├── cards_icici.py, cards_bob.py, cards_hdfc.py, cards_amex.py   statement parsers per bank
 │   ├── card_float.py            when to pay: billing cycle, payment matching, float cost
 │   ├── card_advisor.py          which card for what: best card per spend kind, cost of the wrong one
-│   ├── card_perks.py            card benefits (rewards, milestones, lounge, fees) — seed, read, edit
-│   ├── requirements.txt
+│   ├── card_perks.py            card benefits (rewards, milestones, lounge, fees): seed, read, edit
+│   ├── requirements.txt, requirements-dev.txt
 │   ├── db/                      SQLAlchemy layer
 │   │   ├── engine.py            engine + SessionLocal; DATABASE_URL picks PostgreSQL, else the SQLite file
+│   │   ├── scope.py             per-user scoping: every ORM query filtered to the signed-in user, new rows stamped
 │   │   ├── base.py              declarative Base, row_dict
 │   │   ├── migrate.py           prepare_database(): Alembic upgrade head (adopts pre-Alembic SQLite files)
 │   │   ├── seed.py, ddl.py      starter data and dialect-neutral helpers used by the migrations
+│   │   ├── user_defaults.py     starter categories, budget and reminder categories for a new user
 │   │   ├── replicate.py         copies every table between two databases and verifies the copy
 │   │   ├── mirror.py            keeps the copy fresh: PostgreSQL → SQLite file, or SQLite → PostgreSQL
 │   │   ├── failover.py          which database is main, the switch, the read-only fallback, API guard
-│   │   └── models/              expense, portfolio, cards, reminders and trackers tables
+│   │   ├── synclog.py, syncstats.py   sync history and the Database screen's KPIs, tables and comparison
+│   │   └── models/              access (users, sessions, grants, requests), expense, portfolio, equity, mf,
+│   │                            cards, reminders and trackers tables
 │   ├── routes/
-│   │   ├── api.py               combines the routers below into the one app.py includes
+│   │   ├── api.py               combines the routers below behind auth.guard
+│   │   ├── auth_routes.py       sign-in, me, password change and reset, access requests, admin users/modules
 │   │   ├── expense_routes.py    categories, budget, sub-categories, expenses, dashboard, forecast
-│   │   ├── investing_routes.py  holdings, goals, asset mix, daily prices
+│   │   ├── investing_routes.py  holdings, goals, asset mix, daily prices, CSV export
+│   │   ├── equity_routes.py     the stock ledger
+│   │   ├── mf_routes.py         MF Analysis data, stored Morningstar PDFs
 │   │   ├── card_routes.py       cards, statement import, merchant rules, perks, advice
 │   │   ├── reminder_routes.py   reminders, calendar month, holidays, vacations, .ics feed
 │   │   ├── tracker_routes.py    day trackers, ticks and their KPIs
-│   │   └── status_routes.py     GET /status, POST /database/switch
+│   │   └── status_routes.py     /status, Database screen, /database/switch
 │   ├── tools/copy_to_postgres.py  one-off: copy a SQLite file into PostgreSQL and verify
-│   └── spendlens_v2.db          the SQLite database (main or copy; back it up)
-├── run-api.ps1                  starts the API with DATABASE_URL from .env.local
-├── .env.local                   (git-ignored) DATABASE_URL / TEST_DATABASE_URL for PostgreSQL
+│   └── spendlens_v2.db          (git-ignored) the SQLite database: main or copy
+├── tests/                       pytest suite on a temp database (SQLite, and PostgreSQL in CI)
 └── artifacts/spendlens/         FRONTEND (React 19 + Vite + TypeScript)
-    ├── index.html, vite.config.ts (proxy /spendlens/api → :5000), tsconfig.json
+    ├── index.html, vite.config.ts (localhost; proxy /spendlens/api → :5000 with X-Forwarded-*), tsconfig.json
     └── src/
-        ├── main.tsx, App.tsx    entry and top-bar navigation (Expense / Holdings / Ledger / Cards / Dashboard / ⚙ Admin)
-        ├── api.ts               typed API client
-        ├── theme.ts, months.ts, index.css
+        ├── main.tsx, App.tsx    entry, top-bar navigation (Expense / Holdings / MF Analysis / Ledger / Cards /
+        │                        ⚙ Admin) and URL params
+        ├── auth.tsx             signed-in user and modules; Login when signed out
+        ├── api.ts               typed API client used by every page
+        ├── theme.ts, months.ts, mfMetrics.ts, index.css
         └── components/
-            ├── Expense.tsx          month grid, quick entry, expandable sub-category rows
-            ├── ExpenseDialogs.tsx   cell editor (lines) and Add expense dialog
-            ├── MonthPicker.tsx      ‹ month, year (years with data) ›
-            ├── Dashboard.tsx        Expense + Portfolio dashboards
-            ├── Holdings.tsx
-            ├── Cards.tsx            credit-card cashback dashboard + statement import
-            ├── Ledger.tsx           stock ledger: dividends, XIRR, audit, corporate actions
-            ├── PortfolioDashboard.tsx  KPIs, goals, allocation, risk, history
-            ├── Admin.tsx            Admin shell and tool registry (ADMIN_TOOLS)
+            ├── Login.tsx, ChangePassword.tsx, LockedModule.tsx   sign-in, reset with code, locked-module request
+            ├── Expense.tsx, ExpenseDialogs.tsx, MonthBar.tsx, SpendingInsights.tsx   sheet + spending dashboard
             ├── ReminderCalendar.tsx  the Calendar view: reminders, holidays, vacations, trackers, KPIs
+            ├── Holdings.tsx, HoldingsKpis.tsx, HoldingsSide.tsx, AllocationTab.tsx, MixPlan.tsx, OutlookTab.tsx
+            ├── MfAnalysis.tsx       MF Analysis tabs, Morningstar PDF viewer
+            ├── Ledger.tsx           stock ledger: dividends, XIRR, audit, corporate actions
+            ├── Cards.tsx, CardsOverview.tsx, CardAdvice.tsx, CardPerks.tsx   credit cards
+            ├── Admin.tsx            Admin shell and tool registry (ADMIN_TOOLS)
+            ├── admin/               Categories, Targets, Reminders, HoldingGroups, PortfolioPlan, Prices,
+            │                        CardsAdmin, Users, AccessRequests, Database, Appearance, ...
             ├── DatabaseBanner.tsx   'read-only copy' banner while PostgreSQL is down
-            ├── admin/               Categories.tsx, Reminders.tsx, Database.tsx, Targets.tsx, HoldingGroups.tsx, PortfolioPlan.tsx, Prices.tsx, ...
+            ├── chartKit.tsx, KpiSection.tsx   shared charts and the collapsible KPI section
             └── ui.tsx               Card, Modal, Field, Doughnut, buttons, inputs
 ```
 
@@ -96,26 +123,34 @@ ExpenseTrack/
 
 ```mermaid
 flowchart LR
-    UI["React UI<br/>artifacts/spendlens"] -- "/spendlens/api (JSON)" --> API["FastAPI<br/>routes/ (6 routers)"]
-    API --> GUARD["db/failover.py<br/>main database, switch,<br/>read-only fallback"]
-    GUARD --> PG[("PostgreSQL<br/>main database")]
-    GUARD -. "read-only while<br/>PostgreSQL is down" .-> LITE[("SQLite<br/>spendlens_v2.db")]
+    UI["React UI<br/>artifacts/spendlens<br/>Login · module tabs"] -- "/spendlens/api (JSON)<br/>sl_session cookie" --> SEC["security.py<br/>Origin check · CSP + headers"]
+    SEC --> FOMW["failover middleware<br/>503 on writes while<br/>read-only or switching"]
+    FOMW --> GUARD["auth.guard<br/>session → user,<br/>module / admin check"]
+    GUARD --> API["routes/<br/>9 routers"]
+    API --> DOM["domain modules<br/>expense · portfolio · equity · mf<br/>cards · calendar · forecast"]
+    DOM --> SCOPE["db/scope.py<br/>every ORM query filtered<br/>to the signed-in user"]
+    SCOPE --> FO["db/failover.py<br/>main database, switch,<br/>read-only fallback"]
+    FO --> PG[("PostgreSQL<br/>main database")]
+    FO -. "read-only while<br/>PostgreSQL is down" .-> LITE[("SQLite<br/>spendlens_v2.db")]
     PG -- "db/mirror.py: verified copy<br/>~10 s after saves, every 15 min" --> LITE
-    API --> F["forecast.py"]
-    API --> P["portfolio.py / ledger.py<br/>sip.py / accrual.py"]
-    API --> PX["prices.py<br/>daily price refresh"]
-    API --> CARDS["cards.py + parsers<br/>card_float / advisor / perks"]
-    API --> REM["reminder_routes / tracker_routes<br/>calendar, .ics feed, KPIs"]
-    REM --> HOL["holidays package<br/>India + US"]
-    CARDS -. "unrecognised format<br/>(opt-in)" .-> CLAUDE["Anthropic API<br/>(ANTHROPIC_API_KEY)"]
-    SCH(["background scheduler<br/>every 15 min"]) --> PX
+    SCH(["background scheduler<br/>every 15 min"]) --> PX["prices.py"]
     PX -- "NSE closes" --> Y["Yahoo Finance"]
     PX -- "NAVAll.txt" --> A["AMFI"]
+    DOM -. "unrecognised card statement<br/>(opt-in)" .-> CLAUDE["Anthropic API"]
+    FILES[/"broker files · factsheets<br/>Morningstar reports"/] --> CLI["command line, backend stopped<br/>import_broker.py · import_mf.py"]
+    CC["Claude Code /mf-factsheets<br/>mf-factsheet-analyst agent"] -- "validated JSON" --> CLI
+    FILES --> CC
+    CLI --> SCOPE
     API -. "serves dist/public" .-> UI
 ```
 
-The roles of the two databases can be swapped from Settings › Database; the copy then runs the other way (SQLite →
-PostgreSQL). Without `DATABASE_URL` there is only the SQLite file and none of the failover machinery runs.
+A request passes three gates before any route runs: `security.py` refuses a write from another site, the failover
+middleware refuses writes while the app is on the read-only copy, and `auth.guard` signs the user in from the cookie
+and checks the module the URL belongs to. From then on `db/scope.py` limits every ORM query to that user's rows. The
+roles of the two databases can be swapped from Admin › Database; the copy then runs the other way (SQLite →
+PostgreSQL). Without `DATABASE_URL` there is only the SQLite file and none of the failover machinery runs. Broker
+files and MF factsheets are not uploaded through the UI: they are imported from a folder on the command line (with
+the backend stopped), and can then be deleted.
 
 ### Detailed architecture
 
@@ -126,28 +161,35 @@ box only needs the one next to it to make sense.
 flowchart TB
     subgraph FE["FRONTEND — React 19 + Vite (artifacts/spendlens)"]
         direction LR
-        PAGE_E["Expense<br/>Sheet + Calendar"]
-        PAGE_H["Holdings"]
+        LOGIN["Login<br/>reset with console code"]
+        PAGE_E["Expense<br/>sheet, spending, calendar"]
+        PAGE_H["Holdings<br/>returns, asset mix, goals"]
+        PAGE_M["MF Analysis<br/>scorecard … Morningstar"]
         PAGE_L["Ledger"]
         PAGE_C["Cards"]
-        PAGE_D["Dashboard"]
-        PAGE_A["Admin<br/>ADMIN_TOOLS registry,<br/>Database switch"]
-        BANNER["DatabaseBanner<br/>polls /status"]
+        PAGE_A["Admin<br/>ADMIN_TOOLS, users,<br/>requests, database"]
+        AUTH_TS["auth.tsx<br/>user + modules,<br/>LockedModule"]
         API_TS["api.ts<br/>typed client"]
-        PAGE_E & PAGE_H & PAGE_L & PAGE_C & PAGE_D & PAGE_A & BANNER --> API_TS
+        LOGIN & PAGE_E & PAGE_H & PAGE_M & PAGE_L & PAGE_C & PAGE_A & AUTH_TS --> API_TS
     end
 
-    API_TS -- "/spendlens/api/* (JSON, same origin)" --> MW
+    API_TS -- "/spendlens/api/* (JSON, same origin, cookie)" --> SECMW
 
     subgraph BE["BACKEND — FastAPI (spendlens/)"]
-        MW["failover middleware<br/>503 while switching or read-only,<br/>lost-connection detection"]
-        ROUTER["routes/api.py<br/>combines the 6 routers"]
-        MW --> ROUTER
+        SECMW["security.py<br/>Origin check, CSP, headers"]
+        MW["failover middleware<br/>503 while switching or read-only"]
+        GUARD["routes/api.py + auth.guard<br/>sign-in, MODULE_OF_PATH, admin-only"]
+        SECMW --> MW --> GUARD
 
+        subgraph ACC["Access — auth_routes.py"]
+            direction LR
+            AUTHPY["auth.py<br/>sessions, bcrypt, reset code"]
+            THR["security.py throttles<br/>sign-in, reset code"]
+        end
         subgraph EXP["Expense & budget — expense_routes.py"]
             direction LR
             DBPY["database.py<br/>month helpers"]
-            SUBC["subcategories.py<br/>note → sub-category rules"]
+            SUBC["subcategories.py"]
             FCST["forecast.py"]
         end
         subgraph PORT["Portfolio — investing_routes.py"]
@@ -156,6 +198,15 @@ flowchart TB
             LED["ledger.py"]
             SIPM["sip.py / accrual.py"]
             PRX["prices.py"]
+        end
+        subgraph EQ["Stock ledger — equity_routes.py"]
+            direction LR
+            EQPY["equity.py"]
+            DIV["dividend_agent.py"]
+        end
+        subgraph MFG["MF Analysis — mf_routes.py"]
+            direction LR
+            MFPY["mf.py<br/>scorecard, trend, overlap,<br/>anomalies, cross-check"]
         end
         subgraph CARD["Credit cards — card_routes.py"]
             direction LR
@@ -166,49 +217,76 @@ flowchart TB
         end
         subgraph CAL["Calendar — reminder_routes.py, tracker_routes.py"]
             direction LR
-            REMS["reminders, suggestions,<br/>holidays, vacations, .ics"]
+            REMS["reminders, holidays,<br/>vacations, .ics"]
             TRK["trackers, ticks, KPIs"]
         end
-        STAT["status_routes.py<br/>/status, /database/switch"]
+        STAT["status_routes.py<br/>/status, Database screen, switch"]
 
-        ROUTER --> EXP & PORT & CARD & CAL & STAT
+        GUARD --> ACC & EXP & PORT & EQ & MFG & CARD & CAL & STAT
 
         subgraph DBL["Database layer — spendlens/db/"]
             direction LR
+            SCOPE["scope.py<br/>per-user filter + stamp"]
             SESS["engine.py<br/>SessionLocal"]
             FO["failover.py<br/>main db, switch, fallback"]
             MIR["mirror.py<br/>scheduled copy"]
             REP["replicate.py<br/>copy + checksum verify"]
             MIG["migrate.py + Alembic<br/>schema on startup"]
+            SCOPE --> SESS
             FO --> SESS
             FO --> MIR --> REP
         end
 
-        EXP & PORT & CARD & CAL --> SESS
+        ACC & EXP & PORT & EQ & MFG & CARD & CAL --> SCOPE
         STAT --> FO
         SCHED(["scheduler, every 15 min"]) --> PRX
     end
+
+    subgraph OFFL["Command line — run with the backend stopped"]
+        direction LR
+        IMPB["import_broker.py<br/>+ equity_import.py"]
+        IMPM["import_mf.py<br/>+ mf_parsers.py"]
+        MFX["mf_extract.py<br/>+ mf-factsheet-analyst agent"]
+        RST["reset_password.py"]
+        MFX -- "_extracted/*.json" --> IMPM
+    end
+    TBK[/"tradebook/<br/>Zerodha files"/] --> IMPB
+    FFS[/"fund_fact_sheet/<br/>factsheets, disclosures,<br/>Morningstar reports"/] --> MFX & IMPM
+    IMPB & IMPM & RST --> SESS
 
     SESS --> PG[("PostgreSQL<br/>main")]
     SESS -. "fallback / after a switch" .-> LITE[("SQLite<br/>spendlens_v2.db")]
     REP -- "copy, both directions" --> PG & LITE
     PRX -- "NSE closes" --> YF["Yahoo Finance"]
     PRX -- "NAVAll.txt" --> AMFI["AMFI"]
+    DIV -- "prices, splits, dividends" --> YF
     CPY -. "unrecognised PDF, opt-in" .-> CLAUDE["Anthropic API<br/>reply type-checked + totals re-checked"]
-    ROUTER -. "serves artifacts/spendlens/dist/public" .-> FE
+    GUARD -. "serves artifacts/spendlens/dist/public" .-> FE
 ```
 
-Reading it top to bottom: the **frontend** pages all go through one typed client (`api.ts`). Every request first
-passes the **failover middleware**, which refuses writes with a clear 503 while the app is on the read-only copy or
-in the middle of a database switch. `routes/api.py` then hands it to one of six routers (**expense & budget**,
-**portfolio**, **credit cards**, **calendar** (reminders and trackers) and **status**), each a handful of plain
-Python modules with one job apiece. Every route gets a SQLAlchemy session from `SessionLocal`, which
-`db/failover.py` points at whichever database is the main one: PostgreSQL normally, the SQLite file after a switch,
-or the SQLite file read-only while PostgreSQL is unreachable. `db/mirror.py` keeps the other database a verified
-copy of the main one, using `db/replicate.py`. On startup `app.py` runs Alembic's migrations (`db/migrate.py`), so a
-brand-new database and the live ones always end up in the identical shape. The only things that leave your machine
-are the price refresh (Yahoo Finance, AMFI, both free, no key) and, only if you opt in, an unrecognised card
-statement going to the Anthropic API.
+Reading it top to bottom: the **frontend** pages all go through one typed client (`api.ts`); `auth.tsx` shows the
+sign-in page when there is no session and locks the tabs of modules the user doesn't have (the backend enforces it
+regardless). Every request passes **`security.py`** (a write whose `Origin` is another site is refused; HTML pages
+get a Content-Security-Policy), then the **failover middleware** (writes get a clear 503 while the app is on the
+read-only copy or switching databases), then **`auth.guard`**, which resolves the session cookie to a user, maps the
+URL's first segment to its module (`auth.MODULE_OF_PATH`) and checks the user's grants (`database` and `admin` are
+admin-only). `routes/api.py` then hands it to one of nine routers: **access**, **expense & budget**, **portfolio**,
+**stock ledger**, **MF Analysis**, **credit cards**, **calendar** (reminders and trackers, two routers) and
+**status**. Each is a handful of plain Python modules with one job apiece.
+
+Every route gets a SQLAlchemy session whose ORM queries `db/scope.py` filters to the signed-in user (raw SQL in
+`cards.py` passes `:uid` itself). `db/failover.py` points sessions at whichever database is the main one:
+PostgreSQL normally, the SQLite file after a switch, or the SQLite file read-only while PostgreSQL is unreachable.
+`db/mirror.py` keeps the other database a verified copy of the main one, using `db/replicate.py`. On startup
+`app.py` runs Alembic's migrations (`db/migrate.py`), so a brand-new database and the live ones always end up in the
+identical shape.
+
+**Importers** run outside the server: `import_broker.py` loads Zerodha files into the stock ledger;
+`/mf-factsheets` in Claude Code extracts factsheets into validated JSON (fixed parsers for some AMCs, the
+`mf-factsheet-analyst` agent for the rest) and `import_mf.py` loads it, plus any Morningstar reports, into the MF
+tables. Both refuse to run while the backend is up, because both would write the SQLite mirror. The only things
+that leave your machine are the price and dividend refresh (Yahoo Finance, AMFI: free, no key) and, only if you opt
+in, an unrecognised card statement going to the Anthropic API.
 
 ## API documentation (Swagger)
 
@@ -220,7 +298,8 @@ FastAPI publishes the whole API from the code, so the docs are always current. W
 | ReDoc: the same, as a readable reference | http://localhost:5000/redoc |
 | OpenAPI spec (JSON), for Postman, Insomnia or code generators | http://localhost:5000/openapi.json |
 
-In Swagger, open a group (expense, portfolio, cards, reminders, trackers, status), pick an endpoint, press
+Swagger needs no extra sign-in: it uses the browser's session cookie, so sign in to the app first in the same
+browser. In Swagger, open a group (auth, expense, portfolio, equity, mf, cards, reminders, trackers, status), pick an endpoint, press
 **Try it out**, fill in the parameters and press **Execute**: the request runs against your real data, so a
 `POST`/`PUT`/`DELETE` there changes it. Every endpoint lives under `/spendlens/api/...`. A few to start with:
 
@@ -232,7 +311,8 @@ In Swagger, open a group (expense, portfolio, cards, reminders, trackers, status
 - `POST /spendlens/api/database/switch` with `{"to": "sqlite"}` or `{"to": "postgresql"}` – change the main database
 
 The docs are at the server root (`/docs`), not under `/spendlens/api`; any other path, such as
-`/spendlens/api-docs`, just opens the app.
+`/spendlens/api-docs`, just opens the app. They are on while the backend listens on this computer only (the
+default); with `SPENDLENS_HOST` set to a network address they are off unless `SPENDLENS_DOCS=1`.
 
 ## Data model
 
@@ -242,6 +322,9 @@ Tables, relationships and modelling notes are in [DATA_MODEL.md](DATA_MODEL.md).
 - **Portfolio**: `holdings` with `transactions`, `sip_log`, `price_history`, daily `portfolio_snapshots` / `holding_snapshots`, `portfolio_goals` and `portfolio_plan`.
 - **Credit cards**: `card_accounts` → `cards` → `card_statements` → `card_txns`, plus `card_merchant_rules` and `card_perks`.
 - **Calendar**: `reminder_categories` → `reminders` (+ `reminder_overrides` for one-month moves), `reminder_settings`, `vacations`, `trackers` → `tracker_days` / `tracker_cost_links`. Card dates, SIP dates, holidays and tracker KPIs are computed, not stored.
+- **Users and access**: `users` → `auth_sessions` (only a hash of each cookie is stored), `module_grants`, `access_requests`. Every user-owned table has a `user_id`; `db/scope.py` filters ORM queries to the signed-in user and stamps new rows, and child tables without one (`category_targets`, `tracker_days`, `reminder_overrides`, `card_txns`, ...) are reached through their parent.
+- **Stock ledger**: `equity_trades`, `equity_events` (corporate actions), `equity_dividends`, `broker_holdings`, `equity_securities`, `equity_audit`.
+- **MF Analysis**: `mf_sources` (one imported file per month, with its sha256) → `mf_fund_months` (a fund's figures as one month's factsheet printed them, including managers and the as-on date) → `mf_holdings` (its portfolio that month); `mf_reports` holds Morningstar reports, the PDF included.
 - **Two databases**: the same tables live in PostgreSQL and in `spendlens/spendlens_v2.db`; one is the main database and the other a verified copy of it. Which is main is kept in `spendlens/database-mode.json`, outside both.
 
 ## Prerequisites
@@ -523,11 +606,40 @@ cover months that already have hand-entered expenses, so merging would double co
 [CREDIT_CARDS.md](CREDIT_CARDS.md) for the model, what the real statements showed, and what is
 still to build.
 
+## MF Analysis
+
+MF Analysis reads what the AMCs themselves publish each month, stored in the database (`mf_*` tables), for the
+mutual funds in your Holdings (matched by AMFI code or name; several folios of one fund are one fund).
+
+**Loading data.** Put the files in `fund_fact_sheet/` (git-ignored), flat or in `YYYY-MM/` sub-folders:
+AMC factsheet PDFs, monthly portfolio disclosures (Excel) and, optionally, Morningstar fund reports
+(`morningstarreport*.pdf`). Then, in Claude Code, run **`/mf-factsheets`**. It:
+
+1. lists what is new (`spendlens/mf_extract.py inventory`) and which funds you hold;
+2. reads portfolio disclosures and the factsheets of AMCs with a fixed parser (Axis, Edelweiss;
+   `spendlens/mf_parsers.py`) without AI, and hands other AMCs' PDFs to the `mf-factsheet-analyst` agent, which
+   writes printed figures only (null for anything not printed) as one JSON per file in `fund_fact_sheet/_extracted/`;
+3. validates every JSON and spot-checks figures against the PDF;
+4. imports with the backend **stopped**:
+   ```powershell
+   .\venv_expense\Scripts\python spendlens\import_mf.py fund_fact_sheet --delete-imported
+   ```
+   One bad file stops the import and nothing is saved; re-running is safe (a file replaces what it imported).
+   Morningstar reports are parsed directly and stored with their PDF. `--delete-imported` then deletes every
+   source file whose sha256 the database holds, so a file not yet imported is never deleted (one that another
+   program has open is kept and listed). `--email` picks the user (default: the first admin).
+
+**Tabs.** *Scorecard* (latest figures per fund, coloured against its category), *Factsheet analysis* (what your
+funds bought and sold, by fund or across funds, latest month or by year), *Trends* (month-by-month figures),
+*Anomalies* (manager change, TER up, AUM drop, cash spike, cap-mix outside the mandate, ...), *Overlap* (common
+holdings between your funds), *Morningstar check* (AMC figures vs the Morningstar report, with the report PDF shown
+inline) and *Parameters* (what each metric means and what good looks like).
+
 ## Expense page shortcuts
 
 Click a cell, then just type an amount (Enter saves, Tab saves and moves right, Esc cancels). Enter on a selected cell opens the detail editor (sub-category, note, several lines); Del clears a single-entry cell; arrow keys move the selection; **N** opens *Add expense*; **[** and **]** change the month. The add dialog remembers your last category and sub-category.
 
-## Expense dashboard
+## Spending dashboard (on the Expense page)
 
 - **Spent** – spend against the budget cap, with a marker for where you should be today and an on-pace / ahead / under chip. Cashback is shown in the sub-line.
 - **Left to spend** – cap minus spend, with an amount per remaining day (current month). Past months show *Left unspent* / *Overspent*.
@@ -576,14 +688,14 @@ When an older database is upgraded, the app first copies it next to the original
   | Both set | off | **on** | **> 0** | **Auto (deposits)** | **auto** | **Auto-deposit mode.** One deposit of the SIP amount on the opening date, then one on the SIP day of each following month; each earns interest from its own date. Invested = SIP × number of deposits. |
 
   Other fields: the *closing date* stops deposits and growth and freezes the present value there. *Compounding* is Quarterly, Annual, Simple or Credited yearly; *Credited yearly* (cumulative FD) and its credits box apply only when Recurring deposit is off (with it on, the value compounds quarterly). *SIP day* blank uses the opening date's day; short months use their last day. Use Recurring deposit for a bank RD or any fixed monthly deposit; leave it off for an FD or PF where you enter the invested amount.
-- **Exposure and tags.** Every holding has a *group* (where it sits, e.g. Mutual Funds), one *exposure* (Equity / Gold / Debt / Cash: what it is really invested in) and optional *tags* (sector or theme). Exposure is filled in automatically: EQ → Equity; GOLD or any fund with "gold" in the name → Gold; FD and PF → Debt; CASH → Cash; funds from their name (cap / ELSS / flexi → Equity, arbitrage and debt funds → Debt, liquid → Cash). For the mix calculations Cash counts as Debt, so there are three exposures. The holding dialog has an Exposure box (Auto keeps the current value) and a Tags box. Tags start from the old Sector label (stocks, funds) and *Emergency* for the emergency fund; classification now lives in tags, the *Sector* column is kept only as *Institution / purpose* (bank or goal, mainly for FDs and PFs) and the Portfolio dashboard's "Equity by sector" uses each stock's first tag. The **Dashboard → Asset Mix** tab shows allocation by exposure (donut and table with gain and drift from target), exposure by group, and a themes / sectors breakdown (`GET /portfolio/exposure`).
-- **SIP mix plan (Asset Mix tab).** Set a target Equity / Gold / Debt ratio, expected yearly returns, a "reach within N years" window and a forecast length in Admin → Goals & targets (`PUT /portfolio/mix-plan`, stored in `portfolio_plan` as `mix_targets`, `mix_returns`, `mix_reach_years`, `mix_years`). `GET /portfolio/mix` returns today's SIP split by exposure, a forecast, and the SIP split that reaches the target. Only where new SIPs go changes; nothing is sold. For each month N it solves for the constant SIP shares that put the mix on target at month N (an exposure already above target would need a negative SIP and is held at 0); the first N that works is the earliest possible date, and the split for your chosen window (a gentler change) is the one suggested, switching to the target ratio afterwards. The forecast is one deterministic path at the expected returns, with SIPs stepping up by the yearly rise set in the same admin page.
+- **Exposure and tags.** Every holding has a *group* (where it sits, e.g. Mutual Funds), one *exposure* (Equity / Gold / Debt / Cash: what it is really invested in) and optional *tags* (sector or theme). Exposure is filled in automatically: EQ → Equity; GOLD or any fund with "gold" in the name → Gold; FD and PF → Debt; CASH → Cash; funds from their name (cap / ELSS / flexi → Equity, arbitrage and debt funds → Debt, liquid → Cash). For the mix calculations Cash counts as Debt, so there are three exposures. The holding dialog has an Exposure box (Auto keeps the current value) and a Tags box. Tags start from the old Sector label (stocks, funds) and *Emergency* for the emergency fund; classification now lives in tags, the *Sector* column is kept only as *Institution / purpose* (bank or goal, mainly for FDs and PFs) and the Holdings page's "Equity by sector" uses each stock's first tag. The **Holdings › Asset Mix & Rebalancing** tab shows allocation by exposure (donut and table with gain and drift from target), exposure by group, and a themes / sectors breakdown (`GET /portfolio/exposure`).
+- **SIP mix plan (Asset Mix & Rebalancing tab).** Set a target Equity / Gold / Debt ratio, expected yearly returns, a "reach within N years" window and a forecast length in Admin → Goals & targets (`PUT /portfolio/mix-plan`, stored in `portfolio_plan` as `mix_targets`, `mix_returns`, `mix_reach_years`, `mix_years`). `GET /portfolio/mix` returns today's SIP split by exposure, a forecast, and the SIP split that reaches the target. Only where new SIPs go changes; nothing is sold. For each month N it solves for the constant SIP shares that put the mix on target at month N (an exposure already above target would need a negative SIP and is held at 0); the first N that works is the earliest possible date, and the split for your chosen window (a gentler change) is the one suggested, switching to the target ratio afterwards. The forecast is one deterministic path at the expected returns, with SIPs stepping up by the yearly rise set in the same admin page.
 - **SIPs.** Set an amount and day per holding (Admin → Holding groups → expand a group, or the holding dialog). On that day the amount is added to the holding's invested and present value (units added at the current price for stocks and gold). It runs when the data is read, so missed months are caught up; each application is logged (`sip_log`) and never applied twice. Manual edits are never recalculated.
-- **Portfolio dashboard.** KPIs come from `GET /portfolio/kpis` (`spendlens/portfolio.py`): net worth, gain, XIRR, yearly investing, emergency cover (months of average spend), allocation versus target by group with the amount to add or trim, concentration, sector split, fixed-income yield, best and worst holdings. A value snapshot is stored daily in `portfolio_snapshots` when the app is opened; the 30-day change, history curve and XIRR build from those (XIRR needs 60 days). Goals (`portfolio_goals`), target allocation and return assumptions (`portfolio_plan`) are edited in Admin → Goals & targets. The goal projection is a Monte Carlo simulation, not a trained model: each group grows at its own return and volatility, current SIPs continue and step up yearly, goals are paid out in their year, and the P10/P50/P90 range and per-goal funding odds come from 1,500 paths (plus a lower-returns case). The emergency fund is excluded from goal money.
+- **Portfolio KPIs and goals** (Holdings › Holdings & Returns and Goals & Forecast). KPIs come from `GET /portfolio/kpis` (`spendlens/portfolio.py`): net worth, gain, XIRR, yearly investing, emergency cover (months of average spend), allocation versus target by group with the amount to add or trim, concentration, sector split, fixed-income yield, best and worst holdings. A value snapshot is stored daily in `portfolio_snapshots` when the app is opened; the 30-day change, history curve and XIRR build from those (XIRR needs 60 days). Goals (`portfolio_goals`), target allocation and return assumptions (`portfolio_plan`) are edited in Admin → Goals & targets. The goal projection is a Monte Carlo simulation, not a trained model: each group grows at its own return and volatility, current SIPs continue and step up yearly, goals are paid out in their year, and the P10/P50/P90 range and per-goal funding odds come from 1,500 paths (plus a lower-returns case). The emergency fund is excluded from goal money.
 - **Daily prices** (`spendlens/prices.py`, Admin → Prices). Holdings with *Auto* ticked are updated by a background thread that checks every 15 minutes and runs after 19:00 and 22:30 on weekdays, and straight after start-up if a run was missed (so the app only needs to be open at some point). Equity: NSE symbol in `holdings.ticker`, last close and 52-week high/low from Yahoo Finance's chart endpoint (unofficial, no key). Mutual funds: AMFI scheme code and `units`, value = units × NAV from AMFI's `NAVAll.txt`; MFs stay one line (qty 1, cmp = value) and SIPs buy units at that day's NAV. *Auto-map* suggests symbols (kept only if the live price is within 35% of the stored one) and Direct-Growth scheme codes; *= value → units* fixes the units from today's value. A failed source leaves the old value and shows the reason; every run is logged in `price_runs`, daily prices in `price_history`, and a portfolio snapshot is saved after each run. Gold and fixed-return holdings are not fetched.
 - **Ledger** (`spendlens/equity.py`, `equity_import.py`, `dividend_agent.py`; Ledger page). Broker files are imported from a folder, not through the UI: put Zerodha Console files in one sub-folder per demat account (`tradebook/SK`, `tradebook/SS`; the folder name is the account label) — equity tradebooks (one per financial year), dividend statements (keep the file name, it carries the period) and the holdings statement — stop the backend, and run `python spendlens\import_broker.py tradebook` (`--events actions.json` also adds corporate actions; `--email` picks the user). Re-running is safe (stored trades are skipped, a statement replaces its period), so new files can be added and the command run again. Everything is stored in the database, so the files can be deleted. Trades are replayed with corporate actions into FIFO lots: splits come from Yahoo on Refresh, a few Yahoo misses are built in (Bajaj Finance's 2025 bonus, the Aarti Pharmalabs demerger), and account-specific ones (IPO allotments, buyback tenders, transfers) are added on the Corporate actions tab, usually from an Audit issue's *Fix…* button. The Audit tab checks the share count on every dividend-statement ex-date and on the holdings statement; shares with no known cost are left out of XIRR. Dividend statements are the record of what was paid; after their last day Refresh fills dividends from Yahoo (whose amounts are split-adjusted, so they are multiplied back) for the shares held the day before each ex-date, from 2023. XIRR uses buys out, sales / buybacks / dividends in and today's value; brokerage isn't in the tradebook. The `transactions` table stays for SIP flows, which the Holdings XIRR KPI uses; the old manual-entry Ledger screen is gone.
 - Holdings of type MF / FD / PF are entered as invested + present value (stored as quantity 1 × amounts); EQ / GOLD / CASH use quantity × price.
-- Data lives only in `spendlens/spendlens_v2.db`; copy that file to back it up.
+- Data lives in PostgreSQL when `DATABASE_URL` is set (with `spendlens/spendlens_v2.db` as its verified copy), otherwise in `spendlens/spendlens_v2.db` alone; back up the main one.
 
 **Reward schemes.** A card's *scheme* (Edit) decides how rewards are worked out. *Amazon Pay ICICI*, *ICICI
 Rubyx* and *ICICI Sapphiro* estimate points from the bank's published rates (Rubyx and Sapphiro: 4 points per
