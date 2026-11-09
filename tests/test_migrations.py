@@ -21,9 +21,14 @@ def test_versions_are_unique_and_ordered():
 
 
 def test_seeded_db_is_fully_migrated(seeded_db):
-    conn = connect(seeded_db)
-    assert database.schema_version(conn) == database.MIGRATIONS[-1][0]
-    assert database.pending_migrations(conn) == []
+    """A database Alembic built from empty records every pre-Alembic step as done, so the legacy path never reruns one."""
+    from dbutil import test_db
+    db = test_db()
+    try:
+        done = [r[0] for r in db.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()]
+    finally:
+        db.close()
+    assert done == [m[0] for m in database.MIGRATIONS]
 
 
 def test_running_twice_applies_nothing_the_second_time(unmigrated_db):
@@ -44,8 +49,9 @@ def test_user_id_added_to_owned_tables(unmigrated_db):
     database.run_migrations(conn)
     for t in ("categories", "holdings", "transactions", "portfolio_goals"):
         assert "user_id" in database._columns(conn, t), f"{t} has no user_id"
-        rows = conn.execute(f"SELECT COUNT(*) FROM {t} WHERE user_id IS NOT 1").fetchone()[0]
-        assert rows == 0, f"{t} has rows not owned by user 1"
+        # the real file may hold other users by now; the migration's job is that no row is left without an owner
+        rows = conn.execute(f"SELECT COUNT(*) FROM {t} WHERE user_id IS NULL").fetchone()[0]
+        assert rows == 0, f"{t} has rows with no owner"
 
 
 def test_migration_takes_a_backup_of_a_database_with_data(unmigrated_db):

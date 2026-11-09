@@ -63,8 +63,28 @@ spendlens/*.db
 spendlens/*.db-journal
 spendlens/*.db-wal
 spendlens/*.db-shm
+# database mirror / sync state written at run time (db/mirror.py, db/failover.py)
+spendlens/*.mirror.json
+spendlens/*.sync.json
+spendlens/database-mode.json
+spendlens/*.db.tmp-*
 *.pre-*.bak
 
 # env / secrets
 .env
 .env.*
+
+# Claude Code: per-session hook state and personal settings (.claude/settings.json and hooks/ are shared)
+.claude/.state/
+.claude/settings.local.json
+.claude/hooks/__pycache__/
+.claude/worktrees/
+
+# personal broker files and fund factsheets: imported into the database, never committed (the repo is public)
+tradebook/
+factsheets/
+fund_fact_sheet/
+*.db.bak
+
+# the generated first admin password (auth.bootstrap_admin), deleted after the first sign-in
+spendlens/first-admin-password.txt

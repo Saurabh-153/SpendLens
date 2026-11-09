@@ -1,9 +1,11 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { addExpense, getGrid, getReview, setCellEntries, setRange, type GridCategory, type GridEntry, type MonthlyGrid } from '../api'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
+import { addExpense, getGrid, setCellEntries, setRange, type GridCategory, type GridEntry, type MonthlyGrid } from '../api'
 import { currentMonth, shiftMonth } from '../months'
 import { T, fmt, fmtFull } from '../theme'
 import { AddDialog, CellEditor } from './ExpenseDialogs'
-import MonthPicker from './MonthPicker'
+import MonthBar, { type ExpenseView } from './MonthBar'
+import ReminderCalendar from './ReminderCalendar'
+import { SpendingInsights, SpendingKpis, useSpending } from './SpendingInsights'
 import { btn, card, input } from './ui'
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -36,8 +38,11 @@ const toLine = (e: GridEntry) => ({ id: e.id, subcategory_id: e.subcategory_id, 
 /** A day's entries that belong to other sub-categories than `subId`, as lines to send back unchanged. */
 const othersOf = (entries: GridEntry[], subId: number | null) => entries.filter(e => e.subcategory_id !== subId).map(toLine)
 
-export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', tool: string, tab?: string) => void }) {
-  const [month, setMonth] = useState(currentMonth)
+type ExpenseNav = (page: 'admin', tool: string, tab?: string) => void
+
+function ExpenseSheet({ onNavigate, month, setMonth, bar }: {
+  onNavigate: ExpenseNav; month: string; setMonth: Dispatch<SetStateAction<string>>; bar: (right: ReactNode) => ReactNode
+}) {
   const [grid, setGrid] = useState<MonthlyGrid | null>(null)
   const [error, setError] = useState('')
   const [sel, setSel] = useState<Cell | null>(null)
@@ -45,13 +50,14 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
   const [editing, setEditing] = useState<Cell | null>(null)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
   const [adding, setAdding] = useState(false)
-  const [reviewCount, setReviewCount] = useState(0)
+  const [focusDay, setFocusDay] = useState<number | null>(null)   // a day picked in Daily rhythm
 
   const load = useCallback(() => {
     getGrid(month).then(g => { setGrid(g); setError('') }).catch(e => setError(e.message))
-    getReview().then(r => setReviewCount(r.reduce((s, x) => s + x.count, 0))).catch(() => setReviewCount(0))
   }, [month])
   useEffect(load, [load])
+  useEffect(() => { setFocusDay(null); setSel(null) }, [month])
+  const spending = useSpending(month, grid)   // the KPIs and insights, reloaded with the sheet
 
   const run = useCallback((p: Promise<unknown>) => p.then(load).catch(e => setError(e.message)), [load])
 
@@ -64,6 +70,7 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
   })
   const [boxW, setBoxW] = useState(0)
   const boxRef = useRef<HTMLDivElement | null>(null)
+  const openedAt = useRef('')   // the month the sheet last scrolled to today for
   useEffect(() => {
     const el = boxRef.current
     if (!el) return
@@ -72,6 +79,13 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
     setBoxW(el.clientWidth)
     return () => ro.disconnect()
   }, [grid])
+  useEffect(() => {
+    if (!grid || grid.month !== month || !boxW || openedAt.current === month) return
+    openedAt.current = month
+    if (month !== currentMonth()) return
+    const box = boxRef.current, th = box?.querySelector<HTMLElement>(`th[data-day="${new Date().getDate()}"]`)
+    if (box && th) box.scrollLeft = Math.max(0, th.offsetLeft - box.clientWidth / 2)
+  }, [grid, month, boxW])
   useEffect(() => { try { localStorage.setItem(CAT_W_KEY, String(catW)) } catch { /* private window */ } }, [catW])
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -157,7 +171,7 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
     return () => window.removeEventListener('keydown', onKey)
   }, [saveCell])
 
-  if (!grid) return <div style={{ padding: 20, color: error ? T.negative : T.muted }}>{error || 'Loading…'}</div>
+  if (!grid) return <>{bar(null)}<div style={{ padding: 20, color: error ? T.negative : T.muted }}>{error || 'Loading…'}</div></>
 
   const savings = grid.income - total
   const left = daysLeft(month, grid.days)
@@ -217,7 +231,8 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
   // that sits on top of whatever the cell already shows (a category tint, the header, the totals row).
   // Today's column gets a yellow wash instead, from the header down to the daily total.
   const todayDay = month === currentMonth() ? new Date().getDate() : 0
-  const band = (d: number): React.CSSProperties => (d === todayDay ? { backgroundImage: 'linear-gradient(rgba(250,204,21,0.10), rgba(250,204,21,0.05))' } : d % 2 === 0 ? { backgroundImage: 'linear-gradient(var(--ov-3), var(--ov-3))' } : {})
+  const focusTint = `color-mix(in srgb, ${T.accent} 18%, transparent)`
+  const band = (d: number): React.CSSProperties => (d === focusDay ? { backgroundImage: `linear-gradient(${focusTint}, ${focusTint})` } : d === todayDay ? { backgroundImage: 'linear-gradient(rgba(250,204,21,0.10), rgba(250,204,21,0.05))' } : d % 2 === 0 ? { backgroundImage: 'linear-gradient(var(--ov-3), var(--ov-3))' } : {})
   const slim = (d: number): React.CSSProperties => (dailyTotals[d - 1] === 0 ? { padding: '9px 2px' } : {})
   const th: React.CSSProperties = { position: 'sticky', top: 0, zIndex: 2, backgroundColor: T.surface2, padding: '10px 6px', fontSize: 11, fontWeight: 600, color: T.muted, textAlign: 'center' }
   // The category column and the Actual / Target columns are a shade apart from the date columns, so the grid reads as
@@ -231,21 +246,16 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
   const tableW = catW + 2 * END_W + baseSum + extra * dayNums.length
   const stickyRight = (bg: string, right = 0): React.CSSProperties => ({ position: 'sticky', right, zIndex: 1, background: bg, boxShadow: `-8px 0 8px -8px var(--shadow)` })
 
+  const toInsights = () => document.getElementById('spending-insights')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   return (
-    <div style={{ padding: '20px 24px' }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
-        <MonthPicker month={month} onChange={m => { setMonth(m); setSel(null) }} />
-        <div style={{ flex: 1 }} />
-        {error && <span style={{ color: T.negative, fontSize: 12 }}>{error}</span>}
-        {reviewCount > 0 && (
-          <button onClick={() => onNavigate('admin', 'subcategories', 'review')}
-            style={{ ...btn(), fontSize: 12, padding: '6px 10px', color: T.warn, background: 'rgba(245,158,11,.1)', borderColor: 'transparent' }}>
-            {reviewCount} entries need a sub-category →
-          </button>
-        )}
-        <button style={btn(true)} title="Shortcut: N" onClick={() => setAdding(true)}>+ Add expense</button>
-      </div>
-
+    <>
+    {bar(<>
+      {error && <span style={{ color: T.negative, fontSize: 12 }}>{error}</span>}
+      {spending && <button type="button" onClick={toInsights} style={{ border: 'none', background: 'none', cursor: 'pointer', color: T.accent, fontSize: 12.5, fontWeight: 600, padding: '6px 8px' }}>↓ Insights</button>}
+      <button style={btn(true)} title="Shortcut: N" onClick={() => setAdding(true)}>+ Add expense</button>
+    </>)}
+    <div style={{ padding: '14px 24px 20px' }}>
+      {spending ? <div style={{ marginBottom: 14 }}><SpendingKpis s={spending} month={month} /></div> : (
       <div style={{ ...card, padding: '12px 18px', display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap', marginBottom: 14 }}>
         <div style={{ flex: '1 1 260px' }}>
           <div style={{ fontSize: 13 }}>
@@ -260,8 +270,9 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
         <Stat label="Days left" value={String(left)} />
         {grid.total_cashback > 0 && <Stat label="Cashback" value={fmtFull(grid.total_cashback)} color={T.positive} />}
       </div>
+      )}
 
-      <div ref={boxRef} style={{ ...card, overflow: 'auto', maxHeight: 'calc(100vh - 235px)' }}>
+      <div ref={boxRef} style={{ ...card, overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', tableLayout: 'fixed', width: tableW, fontSize: 12 }}>
           <colgroup>
             <col style={{ width: catW }} />
@@ -277,7 +288,7 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
                   <div style={{ width: 2, height: '100%', background: 'var(--ov-5)' }} />
                 </div>
               </th>
-              {dayNums.map(d => <th key={d} title={d === todayDay ? 'Today' : undefined} style={{ ...th, ...slim(d), ...band(d), ...(d === todayDay ? { color: T.today, boxShadow: `inset 0 -2px 0 ${T.today}` } : {}) }}>
+              {dayNums.map(d => <th key={d} data-day={d} title={d === todayDay ? 'Today' : undefined} style={{ ...th, ...slim(d), ...band(d), ...(d === todayDay ? { color: T.today, boxShadow: `inset 0 -2px 0 ${T.today}` } : {}) }}>
                 {d === todayDay && <div style={{ position: 'absolute', top: 1, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '5px solid transparent', borderRight: '5px solid transparent', borderTop: `7px solid ${T.today}`, filter: 'drop-shadow(0 0 3px rgba(250,204,21,.7))' }} />}
                 <div style={d === todayDay ? { fontWeight: 800 } : undefined}>{d}</div>
                 <div style={{ fontSize: 9, fontWeight: 400, color: d === todayDay ? T.today : T.muted }}>{WEEKDAYS[new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)) - 1, d).getDay()]}</div>
@@ -356,6 +367,15 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
         Click a cell, then type an amount · Enter for details · Del clears · ←↑↓→ move · N new expense · [ ] change month
       </div>
 
+      {spending && <SpendingInsights s={spending} month={month} grid={grid} onReview={() => onNavigate('admin', 'subcategories', 'review')} onPickDay={day => {
+        setFocusDay(day)
+        const box = boxRef.current, th = box?.querySelector<HTMLElement>(`th[data-day="${day}"]`)
+        if (box && th) {
+          box.scrollTo({ left: Math.max(0, th.offsetLeft - box.clientWidth / 2), behavior: 'smooth' })
+          box.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        }
+      }} />}
+
       {editing && editingCat && (
         <CellEditor category={editingCat} day={editing.day} month={month} subs={grid.subcategories} subId={editing.subId}
           entries={(editingCat.days[editing.day]?.entries ?? []).filter(x => editing.subId === undefined || x.subcategory_id === editing.subId)}
@@ -378,6 +398,7 @@ export default function Expense({ onNavigate }: { onNavigate: (page: 'admin', to
           }} />
       )}
     </div>
+    </>
   )
 }
 
@@ -388,4 +409,22 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
       <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: 16, fontWeight: 600, color: color ?? T.text }}>{value}</div>
     </div>
   )
+}
+
+const VIEW_KEY = 'spendlens.expenseView'
+
+/** Sheet | Calendar under one month bar. Only the chosen view is mounted, so the sheet's keyboard shortcuts are off while the calendar shows. */
+export default function Expense({ onNavigate }: { onNavigate: ExpenseNav }) {
+  const [view, setView] = useState<ExpenseView>(() => {
+    try { return localStorage.getItem(VIEW_KEY) === 'calendar' ? 'calendar' : 'sheet' } catch { return 'sheet' }
+  })
+  const [month, setMonth] = useState(currentMonth)   // one month for the Sheet and the Calendar
+  const choose = (v: ExpenseView) => {
+    setView(v)
+    try { localStorage.setItem(VIEW_KEY, v) } catch { /* storage unavailable */ }
+  }
+  const bar = (right: ReactNode) => <MonthBar month={month} onMonth={setMonth} view={view} onView={choose} right={right} />
+  return view === 'sheet'
+    ? <ExpenseSheet onNavigate={onNavigate} month={month} setMonth={setMonth} bar={bar} />
+    : <ReminderCalendar month={month} onMonth={setMonth} bar={bar} />
 }

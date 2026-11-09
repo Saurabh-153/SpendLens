@@ -5,9 +5,8 @@ recommendations. These tests pin the data-safety side of that: nothing is ever r
 """
 import pytest
 
-import cards
-import database
 from test_cards_accounts import MULTI, icici_clean, multi, upload  # noqa: F401  (fixtures and helpers)
+from dbutil import test_db
 
 API = "/spendlens/api"
 
@@ -20,7 +19,7 @@ def two_cards(client, monkeypatch):
 
 
 def row_counts():
-    db = database.get_db()
+    db = test_db()
     try:
         return (db.execute("SELECT COUNT(*) FROM card_txns").fetchone()[0], db.execute("SELECT COUNT(*) FROM card_statements").fetchone()[0],
                 db.execute("SELECT COUNT(*) FROM cards").fetchone()[0])
@@ -65,7 +64,7 @@ def test_a_bad_name_is_refused_and_changes_nothing(client, icici_clean, monkeypa
 def test_closing_a_card_closes_every_number_it_has_had_but_not_its_neighbour(client, icici_clean, monkeypatch):  # noqa: F811
     a, b = two_cards(client, monkeypatch)
     assert client.patch(f"{API}/cards/{a['id']}", json={"status": "closed"}).json()["status"] == "closed"
-    db = database.get_db()
+    db = test_db()
     try:
         st = dict(db.execute("SELECT last4, status FROM cards WHERE issuer='ICICI Bank'").fetchall())
     finally:
@@ -250,7 +249,7 @@ def test_changing_the_scheme_resets_its_rates_and_keeps_the_data(client, seeded_
 def test_editing_the_limit_and_fees_applies_to_every_number_of_one_card(client, icici_clean, monkeypatch):  # noqa: F811
     a, _ = two_cards(client, monkeypatch)
     client.patch(f"{API}/cards/{a['id']}", json={"credit_limit": 123456, "annual_fee": 99})
-    db = database.get_db()
+    db = test_db()
     try:
         rows = db.execute("SELECT last4, credit_limit, annual_fee FROM cards WHERE last4 IN ('7000','7018')").fetchall()
     finally:
@@ -315,7 +314,7 @@ def test_a_dragged_order_is_kept_and_includes_closed_cards(client, icici_clean, 
         assert [c["id"] for c in client.get(f"{API}/cards/overview").json()["cards"]] == flipped
     finally:                       # the database is shared by the whole run, so put it back
         client.patch(f"{API}/cards/{a['id']}", json={"status": "active"})
-        db = database.get_db()
+        db = test_db()
         try:
             db.execute("UPDATE cards SET sort_order=0")
             db.commit()

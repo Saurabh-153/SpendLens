@@ -1,11 +1,11 @@
 """Deleting a category: never with expenses, and the dialog's numbers say what is at stake."""
-import database
+from dbutil import test_db
 
 API = "/spendlens/api"
 
 
 def counts():
-    db = database.get_db()
+    db = test_db()
     try:
         return (db.execute("SELECT COUNT(*) FROM expenses").fetchone()[0], db.execute("SELECT COUNT(*) FROM categories").fetchone()[0])
     finally:
@@ -32,7 +32,7 @@ def test_usage_reports_the_entries_the_dialog_will_show(client, seeded_db):
     u = client.get(f"{API}/categories/{c['id']}/usage").json()
     assert u["entries"] > 0 and u["total"] > 0 and u["months"] >= 1 and u["can_delete"] is False
     assert u["first"] <= u["last"]
-    db = database.get_db()
+    db = test_db()
     try:
         assert u["entries"] == db.execute("SELECT COUNT(*) FROM expenses WHERE category_id=?", (c["id"],)).fetchone()[0]
     finally:
@@ -47,7 +47,7 @@ def test_an_unused_category_with_sub_categories_deletes_cleanly(client, seeded_d
     assert u["entries"] == 0 and u["can_delete"] is True
     assert client.delete(f"{API}/categories/{made['id']}").status_code == 200, sub.text
     assert client.get(f"{API}/categories/{made['id']}/usage").status_code == 404
-    db = database.get_db()
+    db = test_db()
     try:
         assert db.execute("SELECT COUNT(*) FROM subcategories WHERE category_id=?", (made["id"],)).fetchone()[0] == 0, "no orphaned sub-categories"
     finally:

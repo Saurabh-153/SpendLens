@@ -19,6 +19,15 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # A database built by the baseline revision already has both tables in this shape.
+    inspector = sa.inspect(op.get_bind())
+    if "user_id" not in {c["name"] for c in inspector.get_columns("budget_history")}:
+        _budget_history()
+    if "user_id" not in {c["name"] for c in inspector.get_columns("settings")}:
+        _settings()
+
+
+def _budget_history():
     # budget_history: was PRIMARY KEY(from_month) alone, i.e. one global income figure.
     # Rebuild with a surrogate id and (user_id, from_month) unique, same pattern as
     # portfolio_snapshots/portfolio_plan in the previous revision.
@@ -31,6 +40,9 @@ def upgrade() -> None:
         batch_op.create_primary_key("pk_budget_history", ["id"])
         batch_op.create_unique_constraint("uq_budget_history_user_month", ["user_id", "from_month"])
 
+
+
+def _settings():
     # settings: was a singleton row (PRIMARY KEY id, CHECK (id = 1)). Rekey on user_id so each
     # user gets their own row; the existing row becomes user 1's settings.
     with op.batch_alter_table("settings", recreate="always") as batch_op:

@@ -19,6 +19,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    existing = sa.inspect(bind).get_table_names()
+    if "holding_snapshots" not in existing:
+        _create_holding_snapshots()
+    _portfolio_tables(bind, existing)
+
+
+def _create_holding_snapshots():
     op.create_table(
         "holding_snapshots",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -34,15 +42,21 @@ def upgrade() -> None:
         "idx_holding_snapshots_holding", "holding_snapshots", ["holding_id", "snap_date"]
     )
 
+
+def _portfolio_tables(bind, existing):
+
     # portfolio_snapshots and portfolio_plan are created lazily by portfolio.py's ensure(),
     # the first time a route touches them - not by database.py's migrations, which run
     # unconditionally at every startup. On a brand-new database, app.py's `alembic upgrade
     # head` runs before any request does, so neither table exists yet: ALTERing them would
     # fail outright. Create them directly in their final shape in that case; only ALTER the
     # old shape (and backfill existing rows to user_id=1) when there's data to preserve.
-    existing = sa.inspect(op.get_bind()).get_table_names()
+    def has_user_id(table):
+        return "user_id" in {c["name"] for c in sa.inspect(bind).get_columns(table)}
 
-    if "portfolio_snapshots" not in existing:
+    if "portfolio_snapshots" in existing and has_user_id("portfolio_snapshots"):
+        pass  # already in this shape
+    elif "portfolio_snapshots" not in existing:
         op.create_table(
             "portfolio_snapshots",
             sa.Column("id", sa.Integer(), primary_key=True),
@@ -68,7 +82,9 @@ def upgrade() -> None:
                 "uq_portfolio_snapshots_user_date", ["user_id", "snap_date"]
             )
 
-    if "portfolio_plan" not in existing:
+    if "portfolio_plan" in existing and has_user_id("portfolio_plan"):
+        pass
+    elif "portfolio_plan" not in existing:
         op.create_table(
             "portfolio_plan",
             sa.Column("id", sa.Integer(), primary_key=True),

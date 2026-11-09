@@ -14,7 +14,7 @@ import pytest
 
 import cards
 import cards_icici as ic
-import database
+from dbutil import test_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICICI_PDFS = sorted(glob.glob(os.path.join(ROOT, "screenshot", "FY*.pdf")))
@@ -90,11 +90,11 @@ def purge(db):
 
 @pytest.fixture
 def icici_clean(seeded_db):
-    db = database.get_db()
+    db = test_db()
     purge(db)
     db.close()
     yield
-    db = database.get_db()
+    db = test_db()
     purge(db)
     db.close()
 
@@ -224,7 +224,7 @@ def test_a_card_that_never_spent_stands_alone():
 def test_cards_on_one_statement_share_an_account_and_a_replacement_is_one_card(client, icici_clean, monkeypatch):
     out = upload(client, monkeypatch, {"multi.pdf": multi()})
     assert out[0]["ok"] and len(out[0]["cards"]) == 3, out
-    db = database.get_db()
+    db = test_db()
     try:
         accts = {r[0] for r in db.execute("SELECT account_id FROM cards WHERE issuer='ICICI Bank'")}
         assert len(accts) == 1, "cards listed on one statement share a bill"
@@ -347,7 +347,7 @@ def test_the_real_account_is_two_cards_on_one_bill(client, icici_clean):
 def test_the_real_account_books_balance_across_both_cards(client, icici_clean):
     files = [("files", (os.path.basename(p), open(p, "rb"), "application/pdf")) for p in ICICI_PDFS]
     client.post(f"{API}/cards/upload", files=files)
-    db = database.get_db()
+    db = test_db()
     try:
         for (acct,) in db.execute("SELECT DISTINCT account_id FROM cards WHERE issuer='ICICI Bank'").fetchall():
             row = db.execute("""SELECT SUM(CASE WHEN dc='D' THEN amount ELSE -amount END), COUNT(DISTINCT card_id)

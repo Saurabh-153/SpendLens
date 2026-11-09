@@ -8,6 +8,12 @@ import json
 import random
 from datetime import date, timedelta
 
+from sqlalchemy import func
+
+from db import failover
+from db.scope import user_of
+from db.models import Category, Expense, Holding, PortfolioGoal, PortfolioPlan, PortfolioSnapshot, Subcategory
+
 EMERGENCY = "Emergency Fund"
 SIM_PATHS = 1500
 CORRELATION = 0.5  # share of each group's yearly shock that comes from one common market factor
@@ -26,45 +32,39 @@ SEED_GOALS = [("Second Car", 1967151, 2034), ("Anaya Higher Education", 5000000,
               ("Anaya Marriage", 10000000, 2048), ("Second Child Marriage", 12000000, 2055)]
 
 
-def ensure(db, user_id=1):
-    # This CREATE is the pre-multi-user baseline shape only (what database.py's old hand-rolled
-    # migrations produced). It only matters for a database so new Alembic hasn't run against it
-    # yet; app.py runs `alembic upgrade head` at startup right after this, which ALTERs these
-    # tables to the real (user_id-aware) shape every function below actually expects. For an
-    # already-migrated database "IF NOT EXISTS" makes this whole statement a no-op, since the
-    # table already exists in its final shape - which is why it's still safe to call per-request.
-    #
-    # portfolio_goals is the one exception: database.py's _m003_user_id_columns tries to ALTER
-    # it to add user_id, but _add_column silently skips tables that don't exist yet - and this
-    # table is created lazily right here, not by database.py's own startup migrations. On a
-    # genuinely fresh database _m003 runs (and no-ops) before this CREATE ever fires, so that
-    # migration can never add the column; it has to be baked into the CREATE itself instead.
-    db.executescript("""
-        CREATE TABLE IF NOT EXISTS portfolio_snapshots (snap_date TEXT PRIMARY KEY, total REAL, invested REAL, groups TEXT);
-        CREATE TABLE IF NOT EXISTS portfolio_goals (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, target_amount REAL NOT NULL, target_year INTEGER NOT NULL, user_id INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS portfolio_plan (key TEXT PRIMARY KEY, value TEXT);
-    """)
-    if not db.execute("SELECT 1 FROM portfolio_plan WHERE key='goals_seeded' AND user_id=?", (user_id,)).fetchone():
-        db.executemany("INSERT INTO portfolio_goals (name, target_amount, target_year, user_id) VALUES (?,?,?,?)",
-                        [(*g, user_id) for g in SEED_GOALS])
-        db.execute("INSERT INTO portfolio_plan (key, value, user_id) VALUES ('goals_seeded', '1', ?)", (user_id,))
-        db.commit()
+def ensure(session, user_id=None):
+    """The starter goals on first use (once per user, remembered in the plan). They are the owner's own goals (user 1);
+    everyone else starts with none."""
+    if failover.read_only():
+        return
+    user_id = user_of(session) if user_id is None else user_id
+    seeded = session.query(PortfolioPlan.id).filter(PortfolioPlan.key == "goals_seeded", PortfolioPlan.user_id == user_id).first()
+    if not seeded:
+        if user_id == 1:
+            session.add_all([PortfolioGoal(name=n, target_amount=a, target_year=y, user_id=user_id) for n, a, y in SEED_GOALS])
+        session.add(PortfolioPlan(key="goals_seeded", value="1", user_id=user_id))
+        session.commit()
 
 
-def get_plan(db, key, default, user_id=1):
-    r = db.execute("SELECT value FROM portfolio_plan WHERE key=? AND user_id=?", (key, user_id)).fetchone()
+def get_plan(session, key, default, user_id=None):
+    user_id = user_of(session) if user_id is None else user_id
+    r = session.query(PortfolioPlan.value).filter(PortfolioPlan.key == key, PortfolioPlan.user_id == user_id).first()
     if not r:
         return default
     try:
-        return json.loads(r["value"])
+        return json.loads(r[0])
     except ValueError:
         return default
 
 
-def set_plan(db, key, value, user_id=1):
-    db.execute("""INSERT INTO portfolio_plan (key, value, user_id) VALUES (?,?,?)
-                  ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value""", (key, json.dumps(value), user_id))
-    db.commit()
+def set_plan(session, key, value, user_id=None):
+    user_id = user_of(session) if user_id is None else user_id
+    row = session.query(PortfolioPlan).filter(PortfolioPlan.key == key, PortfolioPlan.user_id == user_id).first()
+    if row:
+        row.value = json.dumps(value)
+    else:
+        session.add(PortfolioPlan(key=key, value=json.dumps(value), user_id=user_id))
+    session.commit()
 
 
 def group_of(h):
@@ -79,14 +79,21 @@ def group_totals(held):
     return {k: {kk: round(vv, 2) if kk != "count" else vv for kk, vv in v.items()} for k, v in out.items()}
 
 
-def record_snapshot(db, held, today=None, user_id=1):
-    ensure(db, user_id)
+def record_snapshot(session, held, today=None, user_id=None):
+    if failover.read_only():
+        return
+    user_id = user_of(session) if user_id is None else user_id
+    ensure(session, user_id)
     today = (today or date.today()).isoformat()
-    g = group_totals(held)
-    db.execute("""INSERT INTO portfolio_snapshots (snap_date, total, invested, groups, user_id) VALUES (?,?,?,?,?)
-                  ON CONFLICT(user_id, snap_date) DO UPDATE SET total=excluded.total, invested=excluded.invested, groups=excluded.groups""",
-               (today, round(sum(h["present"] for h in held), 2), round(sum(h["invested"] for h in held), 2), json.dumps(g), user_id))
-    db.commit()
+    vals = {"total": round(sum(h["present"] for h in held), 2), "invested": round(sum(h["invested"] for h in held), 2),
+            "groups": json.dumps(group_totals(held))}
+    row = session.query(PortfolioSnapshot).filter(PortfolioSnapshot.user_id == user_id, PortfolioSnapshot.snap_date == today).first()
+    if row:
+        for k, v in vals.items():
+            setattr(row, k, v)
+    else:
+        session.add(PortfolioSnapshot(snap_date=today, user_id=user_id, **vals))
+    session.commit()
 
 
 def xirr(flows):
@@ -159,6 +166,8 @@ def concentration(held):
         "top": {"name": top["name"], "pct": round(top["present"] / total * 100, 1)} if top else None,
         "top5_pct": round(sum(h["present"] for h in ranked[:5]) / total * 100, 1),
         "over_10": big,
+        "ranked": [{"name": h["name"], "type": h["asset_type"], "value": round(h["present"], 2),
+                    "pct": round(h["present"] / total * 100, 1)} for h in ranked[:10]],
         "sectors": [{"sector": s, "value": round(v, 2), "pct": round(v / eq * 100, 1)} for s, v in sorted(sectors.items(), key=lambda x: -x[1])],
     }
 
@@ -185,7 +194,7 @@ def performers(held):
 def fixed_income(held):
     rated = [h for h in held if h.get("rate") and h["rate"] > 0 and h["present"] > 0]
     w = sum(h["present"] for h in rated)
-    soon = []
+    soon, ladder = [], []
     for h in held:
         try:
             m = date.fromisoformat(h.get("maturity") or "")
@@ -193,16 +202,143 @@ def fixed_income(held):
             continue
         if date.today() <= m <= date.today() + timedelta(days=365):
             soon.append({"name": h["name"], "date": m.isoformat(), "value": h["present"]})
+        if date.today() <= m <= date.today() + timedelta(days=5 * 365):
+            ladder.append({"name": h["name"], "date": m.isoformat(), "value": round(h["present"], 2), "rate": h.get("rate") or None})
     return {"avg_rate": round(sum(h["rate"] * h["present"] for h in rated) / w, 2) if w else None,
-            "rated_value": round(w, 2), "maturing": sorted(soon, key=lambda x: x["date"])}
+            "rated_value": round(w, 2), "maturing": sorted(soon, key=lambda x: x["date"]),
+            "ladder": sorted(ladder, key=lambda x: x["date"])}
 
 
-def monthly_spend(db, today):
+# How quickly each holding can be turned into cash, by instrument type.
+LIQUIDITY = {"CASH": "instant", "EQ": "days", "MF": "days", "GOLD": "days", "FD": "fixed", "PF": "locked"}
+
+
+def liquidity(held):
+    """Value by how fast it can be reached: instant (cash), days (sell shares, funds, gold), fixed (deposits, breakable
+    with a penalty) and locked (provident funds)."""
+    out = {"instant": 0.0, "days": 0.0, "fixed": 0.0, "locked": 0.0}
+    for h in held:
+        out[LIQUIDITY.get(h["asset_type"], "days")] += h["present"]
+    return {k: round(v, 2) for k, v in out.items()}
+
+
+def monthly_spend(session, today):
     """Average spend of the last three complete months that have data."""
     cur = today.strftime("%Y-%m")
-    rows = db.execute("""SELECT substr(date,1,7) m, SUM(amount - COALESCE(cashback,0)) s FROM expenses
-                         WHERE substr(date,1,7) < ? GROUP BY m HAVING s > 0 ORDER BY m DESC LIMIT 3""", (cur,)).fetchall()
-    return sum(r["s"] for r in rows) / len(rows) if rows else 0
+    month = func.substr(Expense.date, 1, 7)
+    spent = func.sum(Expense.amount - func.coalesce(Expense.cashback, 0))
+    rows = (session.query(month, spent).filter(month < cur).group_by(month).having(spent > 0)
+            .order_by(month.desc()).limit(3).all())
+    return sum(r[1] for r in rows) / len(rows) if rows else 0
+
+
+# ---------------------------------------------------------------- goal kinds and the monthly set-aside
+# Large goals are paid from the corpus (the simulation below). Small goals and recurring expenses (school fees, the
+# trip home) are paid from one steady monthly set-aside, planned over the next COMMIT_MONTHS months.
+GOAL_KINDS = ("large", "small", "recurring")
+SMALL_BELOW = 500000  # default size cut-off: a goal under ₹5L is small
+COMMIT_MONTHS = 24
+
+
+def default_kind(amount):
+    return "large" if amount >= SMALL_BELOW else "small"
+
+
+def _mi(year, month):
+    """Month index: months since year 0, so month arithmetic is plain integer arithmetic."""
+    return year * 12 + month - 1
+
+
+def _ym(i):
+    return f"{i // 12:04d}-{i % 12 + 1:02d}"
+
+
+def occurrences(g, first, last):
+    """(month index, amount) of each payment of goal `g` between month indexes `first` and `last`, inclusive.
+    A recurring goal is first due at target_month/target_year for target_amount, then every `every_months`, rising by
+    `escalation_pct` a year, until the end of `end_year`."""
+    start = _mi(g["target_year"], g.get("target_month") or 6)
+    if g.get("kind") != "recurring":
+        return [(start, g["target_amount"])] if first <= start <= last else []
+    step = max(int(g.get("every_months") or 12), 1)
+    end = min(_mi(g["end_year"], 12), last) if g.get("end_year") else last
+    esc = (g.get("escalation_pct") or 0) / 100
+    i = start if start >= first else start + -(-(first - start) // step) * step
+    out = []
+    while i <= end:
+        out.append((i, round(g["target_amount"] * (1 + esc) ** (i // 12 - g["target_year"]))))
+        i += step
+    return out
+
+
+def _spent(session, category_id, subcategory_id, since, until):
+    q = session.query(func.coalesce(func.sum(Expense.amount - func.coalesce(Expense.cashback, 0)), 0)).filter(
+        Expense.category_id == category_id, Expense.date >= since, Expense.date <= until)
+    if subcategory_id:
+        q = q.filter(Expense.subcategory_id == subcategory_id)
+    return round(q.scalar() or 0)
+
+
+def commitments(session, goals, today, income, spend, sip):
+    """The monthly set-aside that pays every small goal and recurring expense on time over the next COMMIT_MONTHS
+    months, the one-time top-up needed when an early payment comes before the pot has built up, how much of the
+    monthly surplus (income - spend - SIPs) that uses, and planned vs spent for recurring expenses linked to a category."""
+    now = _mi(today.year, today.month)
+    first, last = now + 1, now + COMMIT_MONTHS
+    small = [g for g in goals if g.get("kind") == "small"]
+    rec = [g for g in goals if g.get("kind") == "recurring"]
+    payments, steady = [], 0.0
+    for g in small + rec:
+        payments += [{"goal_id": g["id"], "name": g["name"], "kind": g["kind"], "month": _ym(i), "amount": a}
+                     for i, a in occurrences(g, first, last)]
+    payments.sort(key=lambda p: (p["month"], p["kind"], p["name"]))
+
+    small_out = []
+    for g in small:
+        due = _mi(g["target_year"], g.get("target_month") or 6)
+        left = due - now
+        per = g["target_amount"] / left if left >= 1 else 0
+        steady += per
+        small_out.append({"id": g["id"], "name": g["name"], "month": _ym(due), "amount": g["target_amount"],
+                          "months_left": left, "per_month": round(per)})
+
+    cats = {c.id: c.name for c in session.query(Category).filter(Category.id.in_([g["category_id"] for g in rec if g.get("category_id")]))}
+    subs = {s.id: s.name for s in session.query(Subcategory).filter(Subcategory.id.in_([g["subcategory_id"] for g in rec if g.get("subcategory_id")]))}
+    rec_out = []
+    for g in rec:
+        step = max(int(g.get("every_months") or 12), 1)
+        nxt = occurrences(g, first, last + 12 * 40)[:1]
+        if nxt:
+            steady += nxt[0][1] / step
+        yearly = {}
+        for i, a in occurrences(g, _mi(today.year, 1), _mi(today.year + 14, 12)):
+            yearly[i // 12] = yearly.get(i // 12, 0) + a
+        row = {"id": g["id"], "name": g["name"], "every_months": step, "month": g.get("target_month") or 6,
+               "escalation_pct": g.get("escalation_pct") or 0, "end_year": g.get("end_year"),
+               "next": {"month": _ym(nxt[0][0]), "amount": nxt[0][1]} if nxt else None,
+               "yearly": [{"year": y, "amount": a} for y, a in sorted(yearly.items())],
+               "link": None, "spent": None, "planned": None, "since": None}
+        cid = g.get("category_id")
+        if cid in cats:
+            since = _ym(now - step + 1) + "-01"
+            sid = g.get("subcategory_id") if g.get("subcategory_id") in subs else None
+            planned = sum(a for _, a in occurrences(g, now - step + 1, now))
+            row.update(link=cats[cid] + (f" › {subs[sid]}" if sid else ""), since=since, planned=planned or None,
+                       spent=_spent(session, cid, sid, since, today.isoformat()))
+        rec_out.append(row)
+
+    set_aside = int(-(-steady // 500) * 500)
+    due = {}
+    for p in payments:
+        due[p["month"]] = due.get(p["month"], 0) + p["amount"]
+    bal = low = 0
+    for k in range(1, COMMIT_MONTHS + 1):
+        bal += set_aside - due.get(_ym(now + k), 0)
+        low = min(low, bal)
+    return {"months": COMMIT_MONTHS, "start": _ym(now), "set_aside": set_aside, "top_up": int(-(-(-low) // 1000) * 1000),
+            "income": round(income or 0), "spend": round(spend or 0), "sip": round(sip or 0),
+            "surplus": round((income or 0) - (spend or 0) - (sip or 0)),
+            "payments": payments, "small": small_out, "recurring": rec_out}
 
 
 def simulate(groups, goals, assumptions, today=None, seed=7, paths=SIM_PATHS):
@@ -334,23 +470,21 @@ def guess_exposure(h):
     return "Equity", True
 
 
-def seed_exposure(db):
+def seed_exposure(session):
     """Fill the exposure (and a first set of tags) on holdings that have none. Never overwrites what you set."""
-    rows = db.execute("SELECT id, name, asset_type, sector, tags, exposure, grp FROM holdings").fetchall()
-    for r in rows:
-        h = dict(r)
-        sets = {}
+    if failover.read_only():
+        return
+    for row in session.query(Holding).all():
+        h = {"name": row.name, "asset_type": row.asset_type, "sector": row.sector, "tags": row.tags, "exposure": row.exposure, "grp": row.grp}
         if not h["exposure"]:
-            sets["exposure"] = guess_exposure(h)[0]
+            row.exposure = guess_exposure(h)[0]
         if not (h["tags"] or "").strip():
             label = (h["sector"] or "").strip()
             if h["asset_type"] in ("EQ", "MF") and label:
-                sets["tags"] = _EXTRA_LABELS.get(label.lower(), label.title())
+                row.tags = _EXTRA_LABELS.get(label.lower(), label.title())
             elif h["grp"] == EMERGENCY:
-                sets["tags"] = "Emergency"
-        if sets:
-            db.execute(f"UPDATE holdings SET {', '.join(k + '=?' for k in sets)} WHERE id=?", (*sets.values(), h["id"]))
-    db.commit()
+                row.tags = "Emergency"
+    session.commit()
 
 
 def _tag_list(h):
@@ -403,16 +537,25 @@ def mix_of(h):
     return e if e in ("Equity", "Gold") else "Debt"
 
 
-def mix_plan(db):
+def sip_split(held):
+    """Monthly SIP by what it buys. Emergency-fund money is never equity, even if its exposure was guessed as such."""
+    out = dict.fromkeys(MIX, 0.0)
+    for h in held:
+        out["Debt" if group_of(h) == EMERGENCY else mix_of(h)] += h.get("sip_amount") or 0
+    return {e: round(v) for e, v in out.items()}
+
+
+def mix_plan(session):
     """Target ratio (admin), expected returns, horizon and the yearly SIP step-up."""
-    t = get_plan(db, "mix_targets", None)
+    t = get_plan(session, "mix_targets", None)
     if not t:
-        old = get_plan(db, "exposure_targets", {}) or {}
+        old = get_plan(session, "exposure_targets", {}) or {}
         t = {"Equity": old.get("Equity", 0), "Gold": old.get("Gold", 0), "Debt": old.get("Debt", 0) + old.get("Cash", 0)} if old else dict(DEFAULT_MIX_TARGETS)
     s = sum(t.values()) or 100
     t = {e: round(t.get(e, 0) / s * 100, 2) for e in MIX}
-    return {"targets": t, "returns": {**DEFAULT_MIX_RETURNS, **get_plan(db, "mix_returns", {})},
-            "years": get_plan(db, "mix_years", DEFAULT_MIX_YEARS), "reach_years": get_plan(db, "mix_reach_years", DEFAULT_REACH_YEARS), "stepup": get_plan(db, "assumptions", DEFAULT_ASSUMPTIONS).get("stepup", 0)}
+    return {"targets": t, "returns": {**DEFAULT_MIX_RETURNS, **get_plan(session, "mix_returns", {})},
+            "years": get_plan(session, "mix_years", DEFAULT_MIX_YEARS), "reach_years": get_plan(session, "mix_reach_years", DEFAULT_REACH_YEARS),
+            "stepup": get_plan(session, "assumptions", DEFAULT_ASSUMPTIONS).get("stepup", 0)}
 
 
 def _rm(r):

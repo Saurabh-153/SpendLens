@@ -6,15 +6,30 @@ Routes used to all live in this one ~1,900-line file; they are now split by doma
 re-exports `refresh_and_snapshot` since `app.py` and the price scheduler both import it
 from here.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+import auth
 
 from .expense_routes import router as expense_router
 from .investing_routes import router as investing_router, refresh_and_snapshot
 from .card_routes import router as cards_router
+from .equity_routes import router as equity_router
+from .mf_routes import router as mf_router
+from .reminder_routes import router as reminders_router
+from .tracker_routes import router as trackers_router
+from .status_routes import router as status_router
+from .auth_routes import router as auth_router
 
-router = APIRouter()
+# auth.guard runs first on every route: sign-in, then the module (or admin) check for that URL.
+router = APIRouter(dependencies=[Depends(auth.guard)])
+router.include_router(auth_router)
 router.include_router(expense_router)
 router.include_router(investing_router)
 router.include_router(cards_router)
+router.include_router(equity_router)
+router.include_router(mf_router)
+router.include_router(reminders_router)
+router.include_router(trackers_router)
+router.include_router(status_router)
 
 __all__ = ["router", "refresh_and_snapshot"]

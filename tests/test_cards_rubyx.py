@@ -12,8 +12,8 @@ import pytest
 
 import cards
 import cards_icici as ic
-import database
 from test_cards_accounts import icici_clean, multi, upload  # noqa: F401  (fixtures and helpers)
+from dbutil import test_db
 
 API = "/spendlens/api"
 
@@ -207,9 +207,9 @@ def test_other_schemes_have_no_benefits_panel(client, icici_clean, monkeypatch):
 
 
 def test_migration_seven_added_the_currency_column(seeded_db):
-    db = database.get_db()
+    db = test_db()
     try:
-        assert "ccy" in {r[1] for r in db.execute("PRAGMA table_info(card_txns)")}
+        assert "ccy" in {c["name"] for c in __import__("sqlalchemy").inspect(db.get_bind()).get_columns("card_txns")}
     finally:
         db.close()
 

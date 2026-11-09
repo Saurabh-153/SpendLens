@@ -10,7 +10,8 @@ import PointsPanel from './PointsPanel'
 import RubyxPanel from './RubyxPanel'
 import CardPerks from './CardPerks'
 import { Card, Field, Modal, btn, input, label, smallBtn } from './ui'
-import { cardColor, CardChip } from '../cardColors'
+import { cardColor } from '../cardColors'
+import KpiSection, { LineItem } from './KpiSection'
 
 /** One fixed colour per reward class, shared by every card. Grey for "earns nothing" is the meaning,
  *  not a leftover. The legend and table labels carry the identity, never colour alone. */
@@ -37,9 +38,9 @@ const swatch = (c: string) => (
 )
 const th = { color: T.muted, fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.6 } as const
 
-function Kpi({ name, value, sub, color, tip }: { name: string; value: string; sub?: string; color?: string; tip?: string }) {
+function Kpi({ name, value, sub, tip }: { name: string; value: string; sub?: string; color?: string; tip?: string }) {
   return (
-    <Card style={{ padding: '14px 18px', borderTop: `3px solid ${color ?? T.accent}` }}>
+    <Card style={{ padding: '14px 18px' }}>
       <div style={label} title={tip}>{name}</div>
       <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: 24, fontWeight: 700, margin: '4px 0 2px' }}>{value}</div>
       {sub && <div style={{ fontSize: 12, color: T.muted }}>{sub}</div>}
@@ -335,21 +336,23 @@ export default function Cards() {
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {cards.length > 1 && (
             <button onClick={() => { setShowAll(true); remember() }} style={{
-              padding: '7px 14px', borderRadius: 18, fontSize: 13, fontWeight: 600, cursor: 'pointer',
-              border: `1px solid ${showAll ? T.accent : T.border}`,
+              display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 8px 7px 14px', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
               background: showAll ? T.accent : T.surface2, color: showAll ? '#fff' : T.text,
-            }}>All cards</button>
+            }}>All cards
+              <span style={{ minWidth: 22, textAlign: 'center', padding: '1px 7px', borderRadius: 7, fontSize: 11.5, background: showAll ? 'rgba(255,255,255,.22)' : T.border, color: showAll ? '#fff' : T.muted }}>{cards.length}</span>
+            </button>
           )}
-          {!showAll && [...cards].sort((a, b) => Number(a.status === 'closed') - Number(b.status === 'closed')).map(c => {
+          {[...cards].sort((a, b) => Number(a.status === 'closed') - Number(b.status === 'closed')).map(c => {
             const on = !showAll && c.id === cardId
             const closed = c.status === 'closed'
             return (
               <button key={c.id} onClick={() => choose(c.id)} style={{
-                padding: '7px 14px', borderRadius: 18, fontSize: 13, fontWeight: 600, cursor: 'pointer',
-                border: `1px solid ${on ? cardColor(c.color) : T.border}`, borderBottom: `3px solid ${cardColor(c.color)}`,
+                display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 14px', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
                 background: on ? T.accent : T.surface2, color: on ? '#fff' : T.text,
                 opacity: closed && !on ? 0.5 : 1, filter: closed && !on ? 'grayscale(1)' : 'none',
-              }} title={closed ? 'Closed' : undefined}><CardChip color={c.color} name={c.name} size={18} />{c.name.replace(/ ···\d+$/, '')}</button>
+              }} title={closed ? 'Closed' : undefined}>
+                <i style={{ width: 9, height: 9, borderRadius: '50%', background: on ? '#fff' : cardColor(c.color) }} />{c.name.replace(/ ···\d+$/, '')}
+              </button>
             )
           })}
         </div>
@@ -516,31 +519,37 @@ export default function Cards() {
       </Card>
 
       {/* What the card made, or for a card with no reward scheme, how it is used */}
-      {!profile.rewards && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
-          <Kpi name="Card spend" value={fmt(totals.spend)} color={T.accent}
-            sub={`${fmt(totals.avg_monthly_spend)} a month · ${totals.transactions} txns`} />
-          <Kpi name="Last 12 months" value={fmt(totals.spend_12m)} color={T.accent2} sub="net of refunds" />
-          <Kpi name="On EMI" value={totals.emi ? fmt(totals.emi) : '—'} color={T.warn}
-            sub={totals.emi ? `${pct1(totals.emi / (totals.spend || 1) * 100)} of spend, paid as instalments` : 'no EMI instalments'} />
-          <Kpi name="Fees and interest" value={totals.fees_paid ? fmtFull(totals.fees_paid) : '—'} color={T.warn}
-            sub={totals.fees_paid ? 'EMI interest, tax, redemption fees' : 'none charged'} />
-        </div>
-      )}
-      {profile.rewards && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <Kpi name={profile.earned_label ?? (d.points ? 'Rewards earned' : totals.earned_is_estimate ? 'Rewards (estimated)' : 'Cashback earned')} value={fmtFull(totals.earned)} color={T.positive}
-          sub={d.points ? `${d.points.earned.toLocaleString('en-IN')} points at ₹${profile.point_value} · ${pct1(totals.effective_rate)} of spend` : `${pct1(totals.effective_rate)} of spend${totals.milestone_bonus ? ` · incl. ${fmtFull(totals.milestone_bonus)} milestone bonus` : ''}`}
-          tip={totals.earned_is_estimate ? "These statements do not print the reward earned, so it is estimated from the card's rates" : 'Taken from the statements, not computed'} />
-        <Kpi name="Net profit" value={fmtFull(totals.net_profit)} color={totals.net_profit >= 0 ? T.positive : T.negative}
-          sub={totals.fees_paid ? `after ${fmtFull(totals.fees_paid)} of fees${profile.emi_earns ? '' : ' and EMI interest'}` : 'no fees charged'} />
-        {profile.has_leaks
-          ? <Kpi name="Left on the table" value={fmtFull(Math.max(totals.best_possible - totals.earned, 0))} color={T.warn}
-            sub={`if every rupee earned ${Math.max(...Object.values(card.rates))}%`} tip="The gap between what you earned and the most this card can pay" />
-          : <Kpi name="Fees and interest" value={fmtFull(totals.fees_paid)} color={T.warn}
-            sub={totals.fees_paid ? 'EMI interest, processing fees, tax' : 'none'} />}
-        <Kpi name="Card spend" value={fmt(totals.spend)} color={T.accent}
-          sub={`${fmt(totals.avg_monthly_spend)} a month · ${totals.transactions} txns`} />
-      </div>}
+      {(() => {
+        const spendTile = { name: 'Card spend', value: fmt(totals.spend), sub: `${fmt(totals.avg_monthly_spend)} a month · ${totals.transactions} txns` }
+        const tiles: { name: string; value: string; sub: string; color?: string; tip?: string }[] = !profile.rewards ? [
+          spendTile,
+          { name: 'Last 12 months', value: fmt(totals.spend_12m), sub: 'net of refunds' },
+          { name: 'On EMI', value: totals.emi ? fmt(totals.emi) : '—', sub: totals.emi ? `${pct1(totals.emi / (totals.spend || 1) * 100)} of spend, paid as instalments` : 'no EMI instalments' },
+          { name: 'Fees and interest', value: totals.fees_paid ? fmtFull(totals.fees_paid) : '—', sub: totals.fees_paid ? 'EMI interest, tax, redemption fees' : 'none charged', color: totals.fees_paid ? T.warn : undefined },
+        ] : [
+          {
+            name: profile.earned_label ?? (d.points ? 'Rewards earned' : totals.earned_is_estimate ? 'Rewards (estimated)' : 'Cashback earned'), value: fmtFull(totals.earned), color: T.positive,
+            sub: d.points ? `${d.points.earned.toLocaleString('en-IN')} points at ₹${profile.point_value} · ${pct1(totals.effective_rate)} of spend` : `${pct1(totals.effective_rate)} of spend${totals.milestone_bonus ? ` · incl. ${fmtFull(totals.milestone_bonus)} milestone bonus` : ''}`,
+            tip: totals.earned_is_estimate ? "These statements do not print the reward earned, so it is estimated from the card's rates" : 'Taken from the statements, not computed',
+          },
+          { name: 'Net profit', value: fmtFull(totals.net_profit), color: totals.net_profit >= 0 ? T.positive : T.negative,
+            sub: totals.fees_paid ? `after ${fmtFull(totals.fees_paid)} of fees${profile.emi_earns ? '' : ' and EMI interest'}` : 'no fees charged' },
+          profile.has_leaks
+            ? { name: 'Left on the table', value: fmtFull(Math.max(totals.best_possible - totals.earned, 0)), color: T.warn,
+              sub: `if every rupee earned ${Math.max(...Object.values(card.rates))}%`, tip: 'The gap between what you earned and the most this card can pay' }
+            : { name: 'Fees and interest', value: fmtFull(totals.fees_paid), color: T.warn, sub: totals.fees_paid ? 'EMI interest, processing fees, tax' : 'none' },
+          spendTile,
+        ]
+        return (
+          <div style={{ marginBottom: 16 }}>
+            <KpiSection storageKey="spendlens.cardKpisCompact" label="This card" line={tiles.map(t => <LineItem key={t.name} label={t.name} color={t.color}>{t.value}</LineItem>)}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12 }}>
+                {tiles.map(t => <Kpi key={t.name} name={t.name} value={t.value} sub={t.sub} tip={t.tip} />)}
+              </div>
+            </KpiSection>
+          </div>
+        )
+      })()}
 
       {/* Where the rewards come from, and the card's two thresholds */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(330px, 1fr))', gap: 16, marginBottom: (profile.rewards || fee || d.utilisation != null) ? 16 : 0 }}>

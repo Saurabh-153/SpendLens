@@ -8,6 +8,7 @@
   --ov-1: rgba(255,255,255,.015); --ov-2: rgba(255,255,255,.025); --ov-3: rgba(255,255,255,.032);
   --ov-4: rgba(255,255,255,.045); --ov-5: rgba(255,255,255,.07); --ov-6: rgba(255,255,255,.1);
   --shadow: rgba(0,0,0,.5); --scroll: #252b3b;
+  --hol-in: #ffa94d; --hol-us: #6aa2ff;   /* India / US holiday tints on the reminder calendar */
 }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -16,6 +17,7 @@
   --ov-1: rgba(15,23,42,.02); --ov-2: rgba(15,23,42,.035); --ov-3: rgba(15,23,42,.04);
   --ov-4: rgba(15,23,42,.05); --ov-5: rgba(15,23,42,.1); --ov-6: rgba(15,23,42,.12);
   --shadow: rgba(15,23,42,.18); --scroll: #c9d0e0;
+  --hol-in: #c2620a; --hol-us: #2563c9;
 }
 
 body { background: var(--bg-full, var(--bg)); background-attachment: fixed; color: var(--text); font-family: var(--font, Inter, system-ui, sans-serif); }
@@ -47,3 +49,45 @@ h2, .brand { font-family: var(--font-display, inherit); font-weight: var(--displ
 .hero-leave { animation: hero-leave .35s ease-in both; }
 .hero-pulse { animation: hero-pulse .9s ease-in-out infinite alternate; }
 @media (prefers-reduced-motion: reduce) { .hero-jump, .hero-leave { animation-duration: .01s; } .hero-pulse { animation: none; } }
+
+/* Reminder calendar (Expense page, Calendar view). */
+.rc-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+.rc-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)) 76px; }
+.rc-cell {
+  min-height: 104px; border: 0; border-top: 1px solid var(--border); border-right: 1px solid var(--border); padding: 6px 6px 8px;
+  cursor: pointer; background-color: transparent; background-image: var(--rc-tint, none); color: var(--text); text-align: left; font: inherit;
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+}
+.rc-cell:hover { background-color: var(--ov-4); }
+.rc-cell.sel { background-color: var(--ov-5); }
+.rc-cell.out { cursor: default; pointer-events: none; }
+.rc-cell.drop { box-shadow: inset 0 0 0 2px var(--accent); background-color: var(--ov-5); }
+.rc-drag { cursor: grab; }
+.rc-drag:active { cursor: grabbing; }
+.rc-ticks { margin-top: auto; padding-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+.rc-tick {
+  width: 20px; height: 20px; padding: 0; border-radius: 5px; border: 1.5px solid var(--tc); background: transparent; color: #fff;
+  font-size: 12px; line-height: 1; display: grid; place-items: center; cursor: pointer; transition: transform .08s;
+}
+.rc-tick[aria-checked="true"] { background: var(--tc); }
+.rc-tick:hover:not(:disabled) { transform: scale(1.1); }
+.rc-tick:disabled { cursor: not-allowed; border-style: dashed; }
+@media (prefers-reduced-motion: reduce) { .rc-tick { transition: none; } }
+.rc-hol { display: block; font-size: 10px; line-height: 1.25; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-chips { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rc-chip { display: flex; align-items: center; gap: 5px; font-size: 11.5px; line-height: 1.25; padding: 2px 6px; border-radius: 6px; min-width: 0; }
+.rc-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.rc-chip-amt { margin-left: auto; font-size: 10.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+@keyframes rc-pulse { 50% { box-shadow: inset 0 0 0 1.5px #38bdf8, 0 0 0 4px rgba(56, 189, 248, .28); } }
+.rc-pulse { animation: rc-pulse 1.8s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .rc-pulse { animation: none; } }
+@media (max-width: 960px) { .rc-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 700px) {
+  .rc-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .rc-rail { display: none; }
+  .rc-cell { min-height: 64px; padding: 4px; }
+  .rc-chips { flex-direction: row; flex-wrap: wrap; }
+  .rc-chip { padding: 0; background: none !important; box-shadow: none !important; }
+  .rc-chip-name, .rc-chip-amt, .rc-hol { display: none; }
+  .rc-tick { width: 16px; height: 16px; font-size: 10px; }
+}

@@ -14,7 +14,7 @@ import pytest
 
 import cards
 import cards_amex as ax
-import database
+from dbutil import test_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REAL = sorted(glob.glob(os.path.join(ROOT, "screenshot", "activity*.xlsx")))
@@ -158,11 +158,11 @@ def _purge(db):
 
 @pytest.fixture
 def amex_clean(seeded_db):
-    db = database.get_db()
+    db = test_db()
     _purge(db)
     db.close()
     yield
-    db = database.get_db()
+    db = test_db()
     _purge(db)
     db.close()
 

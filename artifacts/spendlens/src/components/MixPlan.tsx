@@ -1,9 +1,10 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { getMix, type MixData } from '../api'
 import { MIX, colorOf } from '../exposure'
 import { displayName } from '../names'
 import { T, fmt } from '../theme'
 import { Card, label } from './ui'
+import { useNarrow } from '../useNarrow'
 
 const GAP = 2
 const monthLabel = (iso: string) => new Date(iso + 'T00:00:00').toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
@@ -99,11 +100,13 @@ function PathChart({ d }: { d: MixData }) {
   )
 }
 
-export default function MixPlan() {
+/** The SIP split, path and forecast. `beside` (the Themes and sectors card) sits next to the Forecast: 65 / 35. */
+export default function MixPlan({ beside }: { beside?: ReactNode }) {
+  const stackForecast = useNarrow(1100)
   const [d, setD] = useState<MixData | null>(null)
   const [error, setError] = useState('')
   useEffect(() => { getMix().then(setD).catch(e => setError(e.message)) }, [])
-  if (!d) return error ? <div style={{ color: T.negative, fontSize: 12.5, marginBottom: 12 }}>{error}</div> : null
+  if (!d) return <>{error && <div style={{ color: T.negative, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}{beside}</>
 
   const p = d.plan
   const noSip = d.sip.total <= 0
@@ -179,8 +182,10 @@ export default function MixPlan() {
         </Card>
       </div>
 
+      <div style={{ display: 'grid', gap: 16, alignItems: 'start',
+        gridTemplateColumns: d.forecast.length > 0 && p && beside && !stackForecast ? 'minmax(0, 13fr) minmax(0, 7fr)' : 'minmax(0, 1fr)' }}>
       {d.forecast.length > 0 && p && (
-        <Card style={{ padding: 20 }}>
+        <Card style={{ padding: 20, marginBottom: 0, minWidth: 0 }}>
           {title('Forecast', 'if you follow the suggested split')}
           {last && (
             <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -190,7 +195,7 @@ export default function MixPlan() {
             </div>
           )}
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, minWidth: 560 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5, minWidth: 460 }}>
               <thead>
                 <tr style={{ color: T.muted, fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.6 }}>
                   <th style={{ ...th, textAlign: 'left', paddingLeft: 0 }}>Year</th>
@@ -214,6 +219,8 @@ export default function MixPlan() {
           <div style={{ fontSize: 11.5, color: T.muted, marginTop: 10 }}>An estimate from the expected returns set in Admin, not a promise. Re-check every few months as markets move the mix.</div>
         </Card>
       )}
+      {beside}
+      </div>
     </div>
   )
 }

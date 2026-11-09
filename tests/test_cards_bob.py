@@ -6,14 +6,13 @@ against the real PDFs run when the files and the password (SPENDLENS_BOB_PASSWOR
 """
 import glob
 import os
-from datetime import date
 
 import pytest
 
 import cards
 import cards_bob as bob
 import cards_icici as ic
-import database
+from dbutil import test_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOB_PDFS = sorted(glob.glob(os.path.join(ROOT, "screenshot", "bob eterna", "*")))
@@ -232,11 +231,11 @@ def _purge(db):
 
 @pytest.fixture
 def bob_clean(seeded_db):
-    db = database.get_db()
+    db = test_db()
     _purge(db)
     db.close()
     yield
-    db = database.get_db()
+    db = test_db()
     _purge(db)
     db.close()
 

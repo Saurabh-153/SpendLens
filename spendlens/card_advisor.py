@@ -22,7 +22,6 @@ Point values are the main assumption (BOB and Rubyx / Sapphiro / Amex points Rs 
 here sees monthly caps, milestone bonuses, lounge access or annual fees, so those appear as notes next to a
 card, not in its rate. The ranking is by reward rate only: that is the thing that is easy to check.
 """
-import re
 from datetime import date, timedelta
 
 #: id, label, what falls in it
@@ -167,10 +166,9 @@ def advice(db, today=None):
     active = [c for c in all_cards if (c["status"] or "active") != "closed" and c["profile"] in TERMS]
     since = (today - timedelta(days=365)).isoformat()
     member_card = {m: c for c in all_cards for m in c["members"]}
-    q = ",".join("?" * len(member_card)) or "NULL"
-    rows = db.execute(f"""SELECT card_id, tx_date, merchant, detail, category, amount, is_spend, kind FROM card_txns
-                          WHERE card_id IN ({q}) AND tx_date >= ? AND (is_spend=1 OR kind='refund')""",
-                      (*member_card, since)).fetchall()
+    rows = C.query(db, """SELECT card_id, tx_date, merchant, detail, category, amount, is_spend, kind FROM card_txns
+                         WHERE card_id IN :ids AND tx_date >= :since AND (is_spend=1 OR kind='refund')""",
+                  ids=list(member_card), since=since).mappings().all()
 
     spend, missed, earned, best_pot = ({p: 0.0 for p in PURPOSE_IDS} for _ in range(4))
     exceptions = {}

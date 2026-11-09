@@ -1,25 +1,16 @@
 import calendar
-import io
-import json
 from datetime import date
-import cards
 from forecast import build_forecast
-from accrual import auto_value, is_auto
-from sip import apply_due_sips, set_sip
-import portfolio as pf
-import prices as px
-import ledger as led
 from subcategories import (normalize, sub_allowed, subcategories_for_month, subcategory_status)
 from database import (budget_caps_for_months, budget_for_month, categories_for_month, category_allowed_in_month,
                       current_month, next_month, prev_month)
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sqlalchemy import exists, func, select
 from ._common import row_dict as _row_dict
 from db.engine import get_session
-from db.models import Category, CategoryTarget, Subcategory, SubcategoryRule, BudgetHistory, Expense
+from db.models import Category, CategoryTarget, Subcategory, SubcategoryRule, BudgetHistory, Expense, Reminder, TrackerCostLink
 
 router = APIRouter(prefix="/spendlens/api", tags=["expense"])
 
@@ -76,7 +67,6 @@ class ExpenseCreate(BaseModel):
     amount: float
     note: str = ""
     cashback: float = 0
-    user_id: int = 1
     subcategory_id: int | None = None
 
 
@@ -204,8 +194,10 @@ def get_categories(month: str = Query(None), session=Depends(get_session)):
     today = current_month()
     cats = session.query(Category).order_by(Category.sort_order, Category.id).all()
     # ascending, so the last row written per category is its latest target as of today
+    # category_targets has no user_id: only the targets of this user's own categories (read through the parent)
     targets = {t.category_id: t.target_pct for t in session.query(CategoryTarget)
-               .filter(CategoryTarget.from_month <= today).order_by(CategoryTarget.from_month)}
+               .filter(CategoryTarget.category_id.in_([c.id for c in cats]), CategoryTarget.from_month <= today)
+               .order_by(CategoryTarget.from_month)}
     used = {r[0] for r in session.query(Expense.category_id).distinct()}
     return [_category_dict(c, today, targets.get(c.id, 0), c.id in used) for c in cats]
 
@@ -295,6 +287,10 @@ def delete_category(cid: int, session=Depends(get_session)):
     session.query(SubcategoryRule).filter(SubcategoryRule.category_id == cid).delete(synchronize_session=False)
     session.query(Subcategory).filter(Subcategory.category_id == cid).delete(synchronize_session=False)
     session.query(CategoryTarget).filter(CategoryTarget.category_id == cid).delete(synchronize_session=False)
+    # Reminders that watched this category (or one of its sub-categories) keep working, just unlinked.
+    session.query(Reminder).filter(Reminder.expense_category_id == cid) \
+        .update({"expense_category_id": None, "expense_subcategory_id": None}, synchronize_session=False)
+    session.query(TrackerCostLink).filter(TrackerCostLink.expense_category_id == cid).delete(synchronize_session=False)
     session.delete(cat)
     session.commit()
     return {"ok": True}
@@ -479,6 +475,8 @@ def delete_subcategory(sid: int, session=Depends(get_session)):
     if has_expenses(session, subcategory_id=sid):
         raise HTTPException(status_code=409, detail="Sub-category has expenses - archive it instead")
     session.query(SubcategoryRule).filter(SubcategoryRule.subcategory_id == sid).delete(synchronize_session=False)
+    session.query(Reminder).filter(Reminder.expense_subcategory_id == sid).update({"expense_subcategory_id": None}, synchronize_session=False)
+    session.query(TrackerCostLink).filter(TrackerCostLink.expense_subcategory_id == sid).delete(synchronize_session=False)
     session.query(Subcategory).filter(Subcategory.id == sid).delete(synchronize_session=False)
     session.commit()
     return {"ok": True}
@@ -618,7 +616,7 @@ def set_cell_entries(data: CellEntries, session=Depends(get_session)):
             row = existing[e.id]
             row.subcategory_id, row.amount, row.note = e.subcategory_id, e.amount, e.note.strip()
         else:
-            session.add(Expense(category_id=data.category_id, user_id=1, date=data.date, amount=e.amount,
+            session.add(Expense(category_id=data.category_id, date=data.date, amount=e.amount,
                                 note=e.note.strip(), cashback=0, subcategory_id=e.subcategory_id))
     session.commit()
     return {"ok": True}
@@ -647,7 +645,7 @@ def set_expense_range(data: RangeSet, session=Depends(get_session)):
             if data.subcategory_id is not None:
                 doomed = doomed.filter(Expense.subcategory_id == data.subcategory_id)
             doomed.delete(synchronize_session=False)
-        session.add(Expense(category_id=data.category_id, user_id=1, date=dt, amount=data.amount,
+        session.add(Expense(category_id=data.category_id, date=dt, amount=data.amount,
                             note=data.note.strip(), subcategory_id=data.subcategory_id))
         session.flush()   # one day at a time, so ids are handed out in the same order as before
     session.commit()
@@ -658,7 +656,7 @@ def set_expense_range(data: RangeSet, session=Depends(get_session)):
 def create_expense(data: ExpenseCreate, session=Depends(get_session)):
     ensure_category_open(session, data.category_id, data.date[:7])
     ensure_sub_ok(session, data.category_id, data.subcategory_id, data.date[:7])
-    row = Expense(category_id=data.category_id, user_id=data.user_id, date=data.date, amount=data.amount,
+    row = Expense(category_id=data.category_id, date=data.date, amount=data.amount,
                   note=data.note, cashback=data.cashback, subcategory_id=data.subcategory_id)
     session.add(row)
     session.commit()
@@ -746,18 +744,27 @@ def get_dashboard(month: str = Query(None), session=Depends(get_session)):
         prev_cat[r.category_id] = prev_cat.get(r.category_id, 0) + r.amount
     prev_daily = [round(v) for v in prev_daily]
 
+    # each category's spend over the six months ending at this one, for the sparkline on its card
+    last6 = months[-6:]
+    hist = {}
+    for r in (session.query(Expense.category_id, ym.label("ym"), func.sum(Expense.amount).label("total"))
+              .filter(ym.between(last6[0], last6[-1])).group_by(Expense.category_id, ym).all()):
+        hist[(r.category_id, r.ym)] = r.total
+
     cat_breakdown = []
     for c in cats:
         cid = c["id"]
         spent = cat_totals.get(cid, 0)
         pct = round(spent / income * 100, 2) if income else 0
-        cat_breakdown.append({**c, "spent": round(spent), "pct": pct, "prev_spent": round(prev_cat.get(cid, 0))})
+        cat_breakdown.append({**c, "spent": round(spent), "pct": pct, "prev_spent": round(prev_cat.get(cid, 0)),
+                              "history": [round(hist.get((cid, mm), 0)) for mm in last6]})
 
     spent_by_sub = func.round(func.sum(Expense.amount)).label("spent")
     sub_rows = (session.query(Expense.category_id, Expense.subcategory_id, Subcategory.name.label("name"), spent_by_sub)
                 .outerjoin(Subcategory, Subcategory.id == Expense.subcategory_id)
                 .filter(Expense.date.like(f"{month}-%"))
-                .group_by(Expense.category_id, Expense.subcategory_id).order_by(spent_by_sub.desc()).all())
+                .group_by(Expense.category_id, Expense.subcategory_id, Subcategory.name)
+                .order_by(spent_by_sub.desc(), Expense.category_id, func.coalesce(Expense.subcategory_id, 0)).all())
     subcategories = [{"category_id": r.category_id, "subcategory_id": r.subcategory_id,
                       "name": r.name or "Unassigned", "spent": r.spent} for r in sub_rows]
 
@@ -768,7 +775,7 @@ def get_dashboard(month: str = Query(None), session=Depends(get_session)):
                 .join(Category, Category.id == Expense.category_id)
                 .outerjoin(Subcategory, Subcategory.id == Expense.subcategory_id)
                 .filter(Expense.date.like(f"{month}-%"), Expense.amount > 0)
-                .order_by(Expense.amount.desc(), Expense.date).limit(5).all())
+                .order_by(Expense.amount.desc(), Expense.date, Expense.id).limit(5).all())
     unassigned = (session.query(func.count(Expense.id))
                   .filter(Expense.date.like(f"{month}-%"), Expense.subcategory_id.is_(None), Expense.amount != 0,
                           Expense.category_id.in_(select(Subcategory.category_id))).scalar())

@@ -441,12 +441,6 @@ def run_migrations(conn):
     return applied
 
 
-def schema_version(conn):
-    if not _table_exists(conn, "schema_migrations"):
-        return 0
-    return conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-
-
 def init_db():
     conn = get_db()
     c = conn.cursor()
@@ -513,60 +507,10 @@ def init_db():
     # deleted (the app lets you delete one that never had an expense) came straight back the next time the server ran.
     fresh = c.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0
 
-    # Seed categories
-    cats = [
-        (1,  "Rent / EMI",          "🏠", "#6c63ff", 15, "Home rent or loan EMI",                True,  1),
-        (2,  "Utilities",           "⚡", "#38bdf8", 4,  "Electricity, internet, OTT, insurance", True,  2),
-        (3,  "Savings / Investment","📈", "#22c55e", 0,  "SIP, FD, PPF — tracked separately",    True,  3),
-        (4,  "Assistance",          "🧹", "#a78bfa", 1,  "Maid, ironing, dry clean",              True,  4),
-        (5,  "Transport",           "🚗", "#fb923c", 2,  "Petrol, cab, train tickets",            True,  5),
-        (6,  "Travel / Vacation",   "✈️", "#34d399", 2,  "Trips, hotels (not daily transport)",   False, 6),
-        (7,  "Milk",                "🥛", "#e2e8f0", 3,  "Daily delivery, curd",                  True,  7),
-        (8,  "Groceries",           "🛒", "#4ade80", 3,  "Big Basket, Patanjali, local",          True,  8),
-        (9,  "Fruits + Veg",        "🥦", "#86efac", 3,  "Fresh produce",                         True,  9),
-        (10, "Egg / Chicken",       "🥚", "#fde68a", 3,  "Licious, local market",                 True,  10),
-        (11, "Eat Out / Order",     "🍽️","#f472b6", 2,  "Swiggy, Zomato, café",                  True,  11),
-        (12, "Children / Baby",     "👶", "#93c5fd", 3,  "Diapers, baby milk, formula",           True,  12),
-        (13, "School Fees",         "🏫", "#fbbf24", 5,  "Tuition, bus, activity",                True,  13),
-        (14, "Shopping / Clothing", "🛍️","#e879f9", 2,  "Apparel, footwear",                     True,  14),
-        (15, "Personal Care",       "💆", "#f9a8d4", 1,  "Salon, haircut, skincare",              False, 15),
-        (16, "Electronics",         "💻", "#60a5fa", 1,  "Gadgets, appliances (one-off)",         False, 16),
-        (17, "Gifts / Occasions",   "🎁", "#fb7185", 1,  "Birthdays, festivals, weddings",        False, 17),
-        (18, "Doctor & Medicine",   "💊", "#ef4444", 4,  "OPD, medicines, tests, health",         True,  18),
-        (19, "Miscellaneous",       "📦", "#64748b", 1,  "Catch-all — keep this small",           True,  19),
-    ]
+    from db.seed import CATEGORIES as cats, FEB_2025_AMOUNTS as expense_data, FEB_2025_NOTES as subs, FEB_2025_CASHBACK
     for cat in (cats if fresh else []):
         c.execute("""INSERT OR IGNORE INTO categories
             (id, name, icon, color, target_pct, hint, visible, sort_order) VALUES (?,?,?,?,?,?,?,?)""", cat)
-
-    # Seed Feb 2025 expenses
-    expense_data = {
-        1:  {1:32000,11:4262},
-        2:  {2:5000,5:493,10:1543,13:199,24:1418,28:1819},
-        4:  {2:2500,11:855,13:899,17:300,20:160},
-        5:  {11:1990,12:1284,17:910,20:200},
-        7:  {1:93,2:166,3:180,4:93,5:93,6:93,7:93,8:93,9:690,10:321,11:94,12:94,13:94,14:161,15:94,16:406,17:94,18:47,19:93,20:93,21:93,22:93,23:202,24:93,25:93,26:93,27:93,28:93},
-        8:  {6:795,7:221,8:70,9:221,13:1528,18:535,27:3627},
-        9:  {2:744,5:510,6:230,8:480,9:114,13:401,17:282,18:143,20:660,23:421,26:55,27:150,28:196},
-        10: {12:230,17:404,18:425,19:290,24:230,28:353},
-        11: {1:525,2:35,3:80,4:35,5:35,7:621,9:35,13:360,14:40,15:275,16:35,17:50,18:35,26:35},
-        14: {1:1338,11:1071,24:1185},
-        18: {3:442,10:234,13:456,14:2047,18:237,19:1200,20:1525,21:1500,22:368,23:973,26:4700,27:1400},
-        19: {5:2995,25:40},
-    }
-    subs = {
-        1: {11:"Maintain"},
-        2: {2:"Health Ins",5:"Prime",10:"Electricity",13:"Netflix",24:"Phone EMI",28:"LIC"},
-        4: {2:"Maid",11:"LPG",13:"Urban Co",17:"Haircut",20:"Hair Cut"},
-        5: {11:"Train",12:"Hotel",17:"Cab+Air",20:"Cab"},
-        8: {6:"Grocery",7:"Grocery",8:"Grocery",9:"Patanjali",13:"Grocery",18:"Grocery",27:"Grocery"},
-        9: {9:"Fruits",13:"Fruits",17:"Fruits+Veg",18:"Fruits+Veg",20:"Fruits+Veg",23:"Fruits",26:"IceCream",27:"Coco Water",28:"Veg"},
-        10:{12:"Egg",17:"Licious",18:"Licious",19:"Eat Out",24:"Egg",28:"Chicken"},
-        11:{2:"Office",3:"Office",4:"Office",5:"Office",7:"Biryani",9:"Office",13:"Dosa",14:"Coffee",15:"Dosa",16:"Eat Out",17:"Office",18:"Office",26:"Office"},
-        14:{1:"First Cry",11:"Makeup",24:"Watch"},
-        18:{3:"Babu Milk",10:"Wipes",13:"Diaper",14:"Mummy",18:"Babu Milk",19:"Skin Doc",20:"Medicine",21:"Medicine",22:"Medicine",23:"Babu Dr",26:"Blood Test",27:"Milk"},
-        19:{5:"Vacuum",25:"Color"},
-    }
 
     existing = c.execute("SELECT COUNT(*) FROM expenses WHERE date LIKE '2025-02-%'").fetchone()[0]
     if fresh and existing == 0:
@@ -579,7 +523,8 @@ def init_db():
 
     # Cashback entries
     if fresh and c.execute("SELECT COUNT(*) FROM expenses WHERE cashback > 0").fetchone()[0] == 0:
-        c.execute("UPDATE expenses SET cashback=1575 WHERE date='2025-02-11' AND category_id=1 AND amount=4262")
+        d, cat_id, amt, cb = FEB_2025_CASHBACK
+        c.execute("UPDATE expenses SET cashback=? WHERE date=? AND category_id=? AND amount=?", (cb, d, cat_id, amt))
 
     conn.commit()
     _migrate_admin(conn)

@@ -11,7 +11,7 @@ import pytest
 
 import cards
 import cards_hdfc as hdfc
-import database
+from dbutil import test_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REAL = sorted(glob.glob(os.path.join(ROOT, "screenshot", "hdfc neu card", "*.pdf")))
@@ -152,11 +152,11 @@ def _purge(db):
 
 @pytest.fixture
 def hdfc_clean(seeded_db):
-    db = database.get_db()
+    db = test_db()
     _purge(db)
     db.close()
     yield
-    db = database.get_db()
+    db = test_db()
     _purge(db)
     db.close()
 

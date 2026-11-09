@@ -11,7 +11,7 @@ import pytest
 
 import cards
 import cards_icici as ic
-import database
+from dbutil import test_db
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICICI_PDFS = sorted(glob.glob(os.path.join(ROOT, "screenshot", "FY*.pdf")))
@@ -179,15 +179,15 @@ statement Date. T&C Apply
 
 def test_two_identical_lines_on_one_day_are_both_kept(seeded_db):
     """The bug this guards: a hash on (date, amount, text) collapsed two real Rs 40 purchases into one."""
-    db = database.get_db()
+    db = test_db()
     try:
         card = cards.get_card(db)
         parsed = cards.parse_statement(SBI)
         assert parsed["purchases"] == 120.0
         _sid, added = cards.save_statement(db, card, parsed, "dup-test")
         assert added == 3
-        stored = db.execute("""SELECT ROUND(SUM(amount),2) FROM card_txns
-                               WHERE statement_id IN (SELECT id FROM card_statements WHERE file='dup-test')""").fetchone()[0]
+        stored = round(db.execute("""SELECT SUM(amount) FROM card_txns
+                               WHERE statement_id IN (SELECT id FROM card_statements WHERE file='dup-test')""").fetchone()[0], 2)
         assert stored == 120.0, "stored spend must equal the statement's own purchases total"
         _sid, again = cards.save_statement(db, card, parsed, "dup-test")
         assert again == 0, "re-importing must add nothing"
@@ -199,7 +199,7 @@ def test_two_identical_lines_on_one_day_are_both_kept(seeded_db):
 
 
 def test_the_billing_cycle_is_read_from_a_statement_that_states_it(seeded_db):
-    db = database.get_db()
+    db = test_db()
     try:
         card = cards.get_card(db)
         parsed = cards.parse_statement(SBI)
@@ -216,7 +216,7 @@ def test_the_billing_cycle_is_read_from_a_statement_that_states_it(seeded_db):
 # ------------------------------------------------------------------ cards from statements
 
 def test_a_new_card_is_created_from_its_statement_once(seeded_db):
-    db = database.get_db()
+    db = test_db()
     try:
         info = ic.parse(FAKE)[0]["card"]
         a, b = cards.resolve_card(db, info), cards.resolve_card(db, info)
@@ -237,7 +237,7 @@ def test_a_new_card_is_created_from_its_statement_once(seeded_db):
 
 
 def test_the_dashboard_is_empty_not_broken_for_a_card_with_no_rows(seeded_db):
-    db = database.get_db()
+    db = test_db()
     try:
         d = cards.dashboard(db)
         assert d["totals"]["spend"] == 0 and d["months"] == [] and d["merchants"] == []
@@ -312,7 +312,7 @@ def test_upload_creates_the_card_and_never_mixes_cards(client, seeded_db, monkey
         assert d["totals"]["spend"] == 2422.0 and d["pay"]["needs_cycle"] is False   # statement day read from the EMI lines
         assert [c["id"] for c in d["profile"]["classes"]] == ["other"] and d["profile"]["rewards"] is False
     finally:  # the fixture database is shared across the session: leave it as found
-        db = database.get_db()
+        db = test_db()
         db.execute("DELETE FROM card_txns WHERE statement_id IN (SELECT id FROM card_statements WHERE file IN ('icici.pdf','sbi.pdf'))")
         db.execute("DELETE FROM card_statements WHERE file IN ('icici.pdf','sbi.pdf')")
         db.execute("DELETE FROM card_perks WHERE card_id IN (SELECT id FROM cards WHERE issuer='ICICI Bank')")
