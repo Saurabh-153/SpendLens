@@ -18,13 +18,13 @@ from pydantic import BaseModel
 from sqlalchemy import func
 
 from db.engine import get_session
+from db.scope import user_of
 from db.models import (Card, Category, Expense, Holding, Reminder, ReminderCategory, ReminderOverride, ReminderSettings, Subcategory,
                        Tracker, Vacation)
 from .expense_routes import parse_month
 
 router = APIRouter(prefix="/spendlens/api", tags=["reminders"])
 
-USER_ID = 1
 REPEATS = ("monthly", "quarterly", "yearly")
 HEX_COLOR = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 CLOCK = re.compile(r"^(\d{1,2}):([0-5]\d)$")
@@ -79,7 +79,7 @@ class ReminderCategoryUpdate(BaseModel):
 
 def _category_or_404(session, cid):
     cat = session.get(ReminderCategory, cid)
-    if not cat or cat.user_id != USER_ID:
+    if not cat or cat.user_id != user_of(session):
         _bad("Reminder category not found", 404)
     return cat
 
@@ -89,14 +89,14 @@ def _category_view(c, count):
 
 
 def _reminder_count(session, cid):
-    return session.query(func.count(Reminder.id)).filter(Reminder.category_id == cid, Reminder.user_id == USER_ID).scalar()
+    return session.query(func.count(Reminder.id)).filter(Reminder.category_id == cid, Reminder.user_id == user_of(session)).scalar()
 
 
 @router.get("/reminder-categories")
 def list_reminder_categories(session=Depends(get_session)):
     counts = dict(session.query(Reminder.category_id, func.count(Reminder.id))
-                  .filter(Reminder.user_id == USER_ID).group_by(Reminder.category_id).all())
-    cats = session.query(ReminderCategory).filter(ReminderCategory.user_id == USER_ID) \
+                  .filter(Reminder.user_id == user_of(session)).group_by(Reminder.category_id).all())
+    cats = session.query(ReminderCategory).filter(ReminderCategory.user_id == user_of(session)) \
         .order_by(ReminderCategory.sort_order, ReminderCategory.id).all()
     return [_category_view(c, counts.get(c.id, 0)) for c in cats]
 
@@ -104,8 +104,8 @@ def list_reminder_categories(session=Depends(get_session)):
 @router.post("/reminder-categories", status_code=201)
 def create_reminder_category(data: ReminderCategoryCreate, session=Depends(get_session)):
     name, color = _clean_name(data.name), _clean_color(data.color)
-    order = (session.query(func.max(ReminderCategory.sort_order)).filter(ReminderCategory.user_id == USER_ID).scalar() or 0) + 1
-    cat = ReminderCategory(user_id=USER_ID, name=name, color=color, sort_order=order)
+    order = (session.query(func.max(ReminderCategory.sort_order)).filter(ReminderCategory.user_id == user_of(session)).scalar() or 0) + 1
+    cat = ReminderCategory(user_id=user_of(session), name=name, color=color, sort_order=order)
     session.add(cat)
     session.commit()
     return _category_view(cat, 0)
@@ -135,10 +135,10 @@ def delete_reminder_category(cid: int, move_to: int = Query(None), delete_remind
     if count:
         if move_to is None and not delete_reminders:
             _bad(f"This category has {count} reminder{'s' if count != 1 else ''}: pass move_to=<category id> or delete_reminders=true", 409)
-        mine = session.query(Reminder).filter(Reminder.category_id == cid, Reminder.user_id == USER_ID)
+        mine = session.query(Reminder).filter(Reminder.category_id == cid, Reminder.user_id == user_of(session))
         if move_to is not None:
             target = session.get(ReminderCategory, move_to)
-            if move_to == cid or not target or target.user_id != USER_ID:
+            if move_to == cid or not target or target.user_id != user_of(session):
                 _bad("move_to must be a different, existing reminder category", 409)
             moved = mine.update({"category_id": move_to}, synchronize_session=False)
         else:
@@ -192,7 +192,7 @@ def _validated(session, v):
     out = dict(v)
     out["name"] = _clean_name(v["name"])
     cat = session.get(ReminderCategory, v["category_id"])
-    if not cat or cat.user_id != USER_ID:
+    if not cat or cat.user_id != user_of(session):
         _bad("Reminder category not found")
     amount = v["amount"]
     if not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount < 0:
@@ -224,14 +224,14 @@ def _validated(session, v):
 
 def _reminder_or_404(session, rid):
     r = session.get(Reminder, rid)
-    if not r or r.user_id != USER_ID:
+    if not r or r.user_id != user_of(session):
         _bad("Reminder not found", 404)
     return r
 
 
 @router.get("/reminders")
 def list_reminders(session=Depends(get_session)):
-    rows = session.query(Reminder).filter(Reminder.user_id == USER_ID).order_by(Reminder.category_id, Reminder.day, Reminder.id).all()
+    rows = session.query(Reminder).filter(Reminder.user_id == user_of(session)).order_by(Reminder.category_id, Reminder.day, Reminder.id).all()
     return [_reminder_view(r) for r in rows]
 
 
@@ -248,19 +248,19 @@ class ReminderSettingsUpdate(BaseModel):
 
 @router.get("/reminders/settings")
 def get_reminder_settings(session=Depends(get_session)):
-    return _settings_view(session.get(ReminderSettings, USER_ID))
+    return _settings_view(session.get(ReminderSettings, user_of(session)))
 
 
 @router.put("/reminders/settings")
 def put_reminder_settings(data: ReminderSettingsUpdate, session=Depends(get_session)):
-    row = session.get(ReminderSettings, USER_ID)
+    row = session.get(ReminderSettings, user_of(session))
     if data.nudge_time is not None:
         m = CLOCK.match(data.nudge_time.strip())
         if not m or int(m.group(1)) > 23:
             _bad("nudge_time must be HH:MM (24 hour)")
         time = f"{int(m.group(1)):02d}:{m.group(2)}"
     if row is None:
-        row = ReminderSettings(user_id=USER_ID, nudge_on=True, nudge_time="21:00")
+        row = ReminderSettings(user_id=user_of(session), nudge_on=True, nudge_time="21:00")
         session.add(row)
     if data.nudge_on is not None:
         row.nudge_on = data.nudge_on
@@ -342,7 +342,7 @@ def _vacation_view(v):
 
 def _vacation_or_404(session, vid):
     v = session.get(Vacation, vid)
-    if not v or v.user_id != USER_ID:
+    if not v or v.user_id != user_of(session):
         _bad("Vacation not found", 404)
     return v
 
@@ -369,14 +369,14 @@ def _vacation_values(name, start, end, color):
 
 @router.get("/vacations")
 def list_vacations(session=Depends(get_session)):
-    rows = session.query(Vacation).filter(Vacation.user_id == USER_ID).order_by(Vacation.start_date, Vacation.id).all()
+    rows = session.query(Vacation).filter(Vacation.user_id == user_of(session)).order_by(Vacation.start_date, Vacation.id).all()
     return [_vacation_view(v) for v in rows]
 
 
 @router.post("/vacations", status_code=201)
 def create_vacation(data: VacationCreate, session=Depends(get_session)):
     name, start, end, color = _vacation_values(data.name, data.start_date, data.end_date, data.color)
-    v = Vacation(user_id=USER_ID, name=name, start_date=start, end_date=end, color=color)
+    v = Vacation(user_id=user_of(session), name=name, start_date=start, end_date=end, color=color)
     session.add(v)
     session.commit()
     return _vacation_view(v)
@@ -404,7 +404,7 @@ def _month_vacations(session, y, mon):
     """Vacations that overlap the month, with their full (unclipped) date range."""
     first = f"{y:04d}-{mon:02d}-01"
     last = f"{y:04d}-{mon:02d}-{calendar.monthrange(y, mon)[1]:02d}"
-    rows = session.query(Vacation).filter(Vacation.user_id == USER_ID, Vacation.start_date <= last, Vacation.end_date >= first) \
+    rows = session.query(Vacation).filter(Vacation.user_id == user_of(session), Vacation.start_date <= last, Vacation.end_date >= first) \
         .order_by(Vacation.start_date, Vacation.id).all()
     return [_vacation_view(v) for v in rows]
 
@@ -482,7 +482,7 @@ def _active_cards(session):
 
 
 def _kind_categories(session):
-    return {c.kind: c.id for c in session.query(ReminderCategory).filter(ReminderCategory.user_id == USER_ID, ReminderCategory.kind.isnot(None))}
+    return {c.kind: c.id for c in session.query(ReminderCategory).filter(ReminderCategory.user_id == user_of(session), ReminderCategory.kind.isnot(None))}
 
 
 @router.get("/reminders/calendar")
@@ -498,9 +498,12 @@ def reminder_calendar(month: str = Query(None), today: str = Query(None), sessio
     def pending(due):
         return "up" if due >= today else "unlinked"
 
-    moved_to = dict(session.query(ReminderOverride.reminder_id, ReminderOverride.day).filter(ReminderOverride.month == month))
+    # reminder_overrides has no user_id: reach it through this user's reminders
+    moved_to = dict(session.query(ReminderOverride.reminder_id, ReminderOverride.day)
+                    .join(Reminder, Reminder.id == ReminderOverride.reminder_id)
+                    .filter(Reminder.user_id == user_of(session), ReminderOverride.month == month))
     out = []
-    for r in session.query(Reminder).filter(Reminder.user_id == USER_ID, Reminder.enabled.is_(True)):
+    for r in session.query(Reminder).filter(Reminder.user_id == user_of(session), Reminder.enabled.is_(True)):
         if not _falls_in(r, mon):
             continue
         due = _clamped(y, mon, moved_to.get(r.id, r.day))
@@ -529,7 +532,7 @@ def reminder_calendar(month: str = Query(None), today: str = Query(None), sessio
         out.append(occ)
 
     out.sort(key=lambda o: (o["day"], o["name"].lower()))
-    nudge = _settings_view(session.get(ReminderSettings, USER_ID))
+    nudge = _settings_view(session.get(ReminderSettings, user_of(session)))
     hols, vacs = _month_holidays(y, mon), _month_vacations(session, y, mon)
     from .tracker_routes import month_trackers  # tracker_routes imports helpers from this module
     return {"month": month, "today": today.isoformat(), "occurrences": out, "logged_days": logged_days,
@@ -578,7 +581,7 @@ def reminder_suggestions(session=Depends(get_session)):
 @router.post("/reminders", status_code=201)
 def create_reminder(data: ReminderCreate, session=Depends(get_session)):
     v = _validated(session, data.model_dump())
-    r = Reminder(user_id=USER_ID, **v)
+    r = Reminder(user_id=user_of(session), **v)
     session.add(r)
     session.commit()
     return _reminder_view(r)
@@ -726,7 +729,7 @@ def _titled(name, amount):
 @router.get("/calendar.ics")
 def reminder_feed(types: str = Query(None), today: str = Query(None), session=Depends(get_session)):
     ref = _parse_today(today)
-    all_cats = session.query(ReminderCategory).filter(ReminderCategory.user_id == USER_ID).order_by(ReminderCategory.sort_order, ReminderCategory.id).all()
+    all_cats = session.query(ReminderCategory).filter(ReminderCategory.user_id == user_of(session)).order_by(ReminderCategory.sort_order, ReminderCategory.id).all()
     if types is None:
         chosen, want_log, want_vacations = {c.id for c in all_cats}, True, True
     else:
@@ -739,10 +742,11 @@ def reminder_feed(types: str = Query(None), today: str = Query(None), session=De
     year_start = date(ref.year, 1, 1)
 
     overrides = {}
-    for o in session.query(ReminderOverride).order_by(ReminderOverride.month):
+    for o in (session.query(ReminderOverride).join(Reminder, Reminder.id == ReminderOverride.reminder_id)
+              .filter(Reminder.user_id == user_of(session)).order_by(ReminderOverride.month)):
         overrides.setdefault(o.reminder_id, []).append(o)
     body = []
-    for r in session.query(Reminder).filter(Reminder.user_id == USER_ID, Reminder.enabled.is_(True)).order_by(Reminder.id):
+    for r in session.query(Reminder).filter(Reminder.user_id == user_of(session), Reminder.enabled.is_(True)).order_by(Reminder.id):
         if r.category_id not in chosen:
             continue
         try:
@@ -770,12 +774,12 @@ def reminder_feed(types: str = Query(None), today: str = Query(None), session=De
                         _rrule("monthly", i["day"], None), i["note"], names[cid])
 
     if want_vacations:
-        for v in session.query(Vacation).filter(Vacation.user_id == USER_ID).order_by(Vacation.start_date, Vacation.id):
+        for v in session.query(Vacation).filter(Vacation.user_id == user_of(session)).order_by(Vacation.start_date, Vacation.id):
             start, end = date.fromisoformat(v.start_date), date.fromisoformat(v.end_date)
             body += ["BEGIN:VEVENT", f"UID:vacation-{v.id}@spendlens", f"DTSTAMP:{stamp}", f"DTSTART;VALUE=DATE:{start:%Y%m%d}",
                      f"DTEND;VALUE=DATE:{end + timedelta(days=1):%Y%m%d}", f"SUMMARY:{_esc(v.name)}", "TRANSP:TRANSPARENT", "END:VEVENT"]
 
-    settings = _settings_view(session.get(ReminderSettings, USER_ID))
+    settings = _settings_view(session.get(ReminderSettings, user_of(session)))
     if want_log and settings["nudge_on"]:
         hh, mm = settings["nudge_time"].split(":")
         body += ["BEGIN:VEVENT", "UID:log-nudge@spendlens", f"DTSTAMP:{stamp}", f"DTSTART:{ref:%Y%m%d}T{hh}{mm}00", "DURATION:PT15M",

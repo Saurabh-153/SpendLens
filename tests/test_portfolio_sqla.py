@@ -1,4 +1,4 @@
-"""Portfolio write paths on SQLAlchemy: holdings, SIPs, the ledger, price refresh and snapshots.
+"""Portfolio write paths on SQLAlchemy: holdings, SIPs (and the transactions they log), price refresh and snapshots.
 
 Every test cleans up the rows it adds, because the seeded database is shared by the whole suite.
 """
@@ -116,38 +116,6 @@ def test_mf_sip_buys_units_at_nav(client, cleanup, session):
     sip.apply_due_sips(session, today)
     session.refresh(row)
     assert row.units == pytest.approx(110.0) and row.cmp == pytest.approx(6600.0) and row.buy_price == 5600
-
-
-# ---------------------------------------------------------------- ledger
-def test_ledger_buy_sell_apply_and_delete(client, cleanup):
-    h = _new_holding(client, cleanup, name="ZZ Ledger EQ")
-    buy = client.post(f"{API}/transactions", json={"holding_id": h["id"], "tx_date": "2025-06-10", "kind": "buy",
-                                                  "qty": 10, "price": 140, "fees": 5, "apply": 1})
-    assert buy.status_code == 201, buy.text
-    held = next(x for x in client.get(f"{API}/holdings").json() if x["id"] == h["id"])
-    assert held["qty"] == 20 and held["buy_price"] == pytest.approx((1000 + 1405) / 20) and held["cmp"] == 120
-
-    too_many = client.post(f"{API}/transactions", json={"holding_id": h["id"], "tx_date": "2025-07-01", "kind": "SELL",
-                                                       "qty": 50, "price": 150, "apply": 1})
-    assert too_many.status_code == 400 and "only hold" in too_many.json()["detail"]
-    held = next(x for x in client.get(f"{API}/holdings").json() if x["id"] == h["id"])
-    assert held["qty"] == 20, "a rejected sale changes nothing"
-
-    sell = client.post(f"{API}/transactions", json={"holding_id": h["id"], "tx_date": "2025-07-01", "kind": "SELL",
-                                                   "qty": 5, "price": 150, "apply": 1})
-    assert sell.status_code == 201
-    rows = client.get(f"{API}/transactions?holding_id={h['id']}").json()
-    assert rows["total"] == 2 and [r["kind"] for r in rows["rows"]] == ["SELL", "BUY"]
-    assert rows["rows"][0]["fy"] == "FY2025-26" and rows["rows"][0]["realized"] == pytest.approx(750 - 5 * (2405 / 20))
-    assert list(rows["rows"][0])[:4] == ["id", "holding_id", "name", "tx_date"], "row keys keep the table's column order"
-
-    assert client.post(f"{API}/transactions", json={"tx_date": "2025-07-01", "kind": "BUY", "amount": 5}).status_code == 400
-    assert client.post(f"{API}/transactions", json={"holding_id": 99999999, "tx_date": "2025-07-01", "kind": "BUY"}).status_code == 404
-
-    summary = client.get(f"{API}/ledger/summary").json()
-    assert any(x["id"] == h["id"] and x["covered"] for x in summary["xirr"]["holdings"])
-    client.delete(f"{API}/transactions/{buy.json()['id']}")
-    assert client.get(f"{API}/transactions?holding_id={h['id']}").json()["total"] == 1
 
 
 # ---------------------------------------------------------------- prices

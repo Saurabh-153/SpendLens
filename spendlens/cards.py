@@ -38,6 +38,8 @@ from datetime import date, datetime, timedelta
 
 from sqlalchemy import bindparam, text
 
+from db.scope import user_of
+
 import card_float as cf
 import cards_amex
 import cards_bob
@@ -49,6 +51,7 @@ import cards_icici
 
 def query(db, sql, **params):
     """Run SQL with named parameters; a list value expands for `IN :name`."""
+    params.setdefault("uid", user_of(db))   # every statement may use :uid to stay inside the signed-in user's own rows
     stmt = text(sql)
     lists = [k for k, v in params.items() if isinstance(v, (list, tuple, set))]
     if lists:
@@ -579,7 +582,7 @@ def user_rules(db, card_id):
     card = get_card(db, card_id) or {}
     ids = [c["id"] for c in family_of(db, card_id)] if card else [card_id]
     rows = query(db, """SELECT cls, match_type, pattern FROM card_merchant_rules
-                       WHERE card_id IS NULL OR card_id IN :ids ORDER BY id DESC""", ids=ids).mappings().all()
+                       WHERE (card_id IS NULL AND user_id = :uid) OR card_id IN :ids ORDER BY id DESC""", ids=ids).mappings().all()
     return [(r["cls"], r["match_type"], r["pattern"].upper()) for r in rows] + profile_of(card)["rules"]
 
 
@@ -626,9 +629,9 @@ def earn(txns, rules, rates=None, cap=5000.0, default=OFFLINE, emi_earns=True):
 def get_card(db, card_id=None):
     """The card to work with. With no id, the first active card."""
     if card_id:
-        row = query(db, "SELECT * FROM cards WHERE id=:id", id=card_id).mappings().first()
+        row = query(db, "SELECT * FROM cards WHERE id=:id AND user_id=:uid", id=card_id).mappings().first()
     else:
-        row = query(db, "SELECT * FROM cards WHERE status='active' ORDER BY id LIMIT 1").mappings().first()
+        row = query(db, "SELECT * FROM cards WHERE status='active' AND user_id=:uid ORDER BY id LIMIT 1").mappings().first()
     return dict(row) if row else None
 
 
@@ -640,7 +643,7 @@ def resolve_card(db, info):
     profile says it is known.
     """
     issuer, last4 = info.get("issuer", ""), (info.get("last4") or "")
-    rows = [dict(r) for r in query(db, "SELECT * FROM cards WHERE issuer=:issuer", issuer=issuer).mappings()]
+    rows = [dict(r) for r in query(db, "SELECT * FROM cards WHERE issuer=:issuer AND user_id=:uid", issuer=issuer).mappings()]
     for r in rows:
         if last4 and r["last4"] and (r["last4"].endswith(last4) or last4.endswith(r["last4"])):
             return r
@@ -654,13 +657,13 @@ def _insert_card(db, info):
     issuer, last4 = info.get("issuer", ""), (info.get("last4") or "")
     P = PROFILES.get(info.get("profile") or "generic", PROFILES["generic"])
     name = info.get("name") or "Credit card"
-    acct = query(db, "INSERT INTO card_accounts (issuer, label) VALUES (:issuer, :label) RETURNING id",
+    acct = query(db, "INSERT INTO card_accounts (issuer, label, user_id) VALUES (:issuer, :label, :uid) RETURNING id",
                 issuer=issuer, label=name).scalar_one()
     new_id = query(
         db, """INSERT INTO cards (name, issuer, last4, profile, rates, credit_limit, statement_day, grace_days,
-                                  pay_buffer_days, cycle_verified, annual_fee, fee_waiver_spend, cashback_cap, account_id)
+                                  pay_buffer_days, cycle_verified, annual_fee, fee_waiver_spend, cashback_cap, account_id, user_id)
                VALUES (:name, :issuer, :last4, :profile, :rates, :credit_limit, :statement_day, :grace_days,
-                       :pay_buffer_days, :cycle_verified, :annual_fee, :fee_waiver_spend, :cashback_cap, :account_id)
+                       :pay_buffer_days, :cycle_verified, :annual_fee, :fee_waiver_spend, :cashback_cap, :account_id, :uid)
                RETURNING id""",
         name=name, issuer=issuer, last4=last4, profile=info.get("profile") or "generic",
         rates=json.dumps(P["rates"]), credit_limit=P["credit_limit"], statement_day=P["statement_day"],
@@ -680,11 +683,11 @@ REPLACE_GAP_DAYS = 120
 
 def link_accounts(db, card_ids):
     """Put these cards on one billing account: they were listed on the same statement."""
-    accts = sorted(set(query(db, "SELECT account_id FROM cards WHERE id IN :ids", ids=card_ids).scalars()))
+    accts = sorted(set(query(db, "SELECT account_id FROM cards WHERE id IN :ids AND user_id=:uid", ids=card_ids).scalars()))
     keep = accts[0]
     for a in accts[1:]:
-        query(db, "UPDATE cards SET account_id=:keep WHERE account_id=:old", keep=keep, old=a)
-        query(db, "DELETE FROM card_accounts WHERE id=:id", id=a)
+        query(db, "UPDATE cards SET account_id=:keep WHERE account_id=:old AND user_id=:uid", keep=keep, old=a)
+        query(db, "DELETE FROM card_accounts WHERE id=:id AND user_id=:uid", id=a)
     return keep
 
 
@@ -693,7 +696,7 @@ def account_cards(db, account_id):
     # NULLS FIRST is SQLite's default for ascending order and not PostgreSQL's: a card with no spend yet sorts first in both.
     rows = query(db, """SELECT c.*, MIN(t.tx_date) AS _lo, MAX(t.tx_date) AS _hi FROM cards c
                        LEFT JOIN card_txns t ON t.card_id = c.id AND (t.is_spend = 1 OR t.kind = 'refund')
-                       WHERE c.account_id = :acct GROUP BY c.id ORDER BY _lo NULLS FIRST, c.id""", acct=account_id)
+                       WHERE c.account_id = :acct AND c.user_id = :uid GROUP BY c.id ORDER BY _lo NULLS FIRST, c.id""", acct=account_id)
     return [dict(r) for r in rows.mappings()]
 
 
@@ -756,7 +759,7 @@ def _assign_colors(cards_):
 def list_cards(db):
     """One entry per physical card (its newest number), most recently used first."""
     out = []
-    for acct in query(db, "SELECT id FROM card_accounts ORDER BY id").scalars().all():
+    for acct in query(db, "SELECT id FROM card_accounts WHERE user_id=:uid ORDER BY id").scalars().all():
         for chain in lineage(account_cards(db, acct)):
             rep = chain[-1]
             out.append({**{k: v for k, v in rep.items() if not k.startswith("_")},
@@ -767,7 +770,7 @@ def list_cards(db):
     for c in out:                 # a colour handed out is kept, so it never moves when other cards change
         if not chosen[id(c)]:
             for i in c["members"]:
-                query(db, "UPDATE cards SET color=:color WHERE id=:id AND color=''", color=c["color"], id=i)
+                query(db, "UPDATE cards SET color=:color WHERE id=:id AND color='' AND user_id=:uid", color=c["color"], id=i)
     db.commit()
     by_use = sorted(out, key=lambda c: c["last_used"], reverse=True)
     # Cards you have placed come first in the order you chose, closed ones included; the rest stay most recently used first.
@@ -782,7 +785,7 @@ def set_card_order(db, ids):
         raise KeyError(bad[0])
     for pos, cid in enumerate(ids, start=1):
         for m in known[cid]["members"]:
-            query(db, "UPDATE cards SET sort_order=:pos WHERE id=:id", pos=pos, id=m)
+            query(db, "UPDATE cards SET sort_order=:pos WHERE id=:id AND user_id=:uid", pos=pos, id=m)
     db.commit()
     return [c["id"] for c in list_cards(db)]
 
@@ -819,20 +822,20 @@ def _learn_cycle(db, card, parsed):
     if parsed.get("due_date") and parsed.get("stmt_date") and (not older or not card.get("cycle_verified")):
         s, d = date.fromisoformat(parsed["stmt_date"]), date.fromisoformat(parsed["due_date"])
         if 0 < (d - s).days <= 60:
-            query(db, "UPDATE cards SET statement_day=:day, grace_days=:grace, cycle_verified=1 WHERE id=:id",
+            query(db, "UPDATE cards SET statement_day=:day, grace_days=:grace, cycle_verified=1 WHERE id=:id AND user_id=:uid",
                  day=s.day, grace=(d - s).days, id=card["id"])
             if not older and parsed.get("credit_limit", 0) > 0:
-                query(db, "UPDATE cards SET credit_limit=:limit WHERE id=:id", limit=parsed["credit_limit"], id=card["id"])
+                query(db, "UPDATE cards SET credit_limit=:limit WHERE id=:id AND user_id=:uid", limit=parsed["credit_limit"], id=card["id"])
             return
     if older:
         return
     if parsed.get("credit_limit", 0) > 0 and card.get("credit_limit", 0) != parsed["credit_limit"]:
-        query(db, "UPDATE cards SET credit_limit=:limit WHERE id=:id", limit=parsed["credit_limit"], id=card["id"])
+        query(db, "UPDATE cards SET credit_limit=:limit WHERE id=:id AND user_id=:uid", limit=parsed["credit_limit"], id=card["id"])
     hint = parsed.get("statement_day_hint")
     if hint and not card.get("cycle_verified"):
-        query(db, "UPDATE cards SET statement_day=:day WHERE id=:id", day=hint, id=card["id"])
+        query(db, "UPDATE cards SET statement_day=:day WHERE id=:id AND user_id=:uid", day=hint, id=card["id"])
     elif parsed.get("kind") == "cycle" and parsed.get("stmt_date") and not card.get("cycle_verified"):
-        query(db, "UPDATE cards SET statement_day=:day WHERE id=:id",       # no due date printed: the day is still known
+        query(db, "UPDATE cards SET statement_day=:day WHERE id=:id AND user_id=:uid",       # no due date printed: the day is still known
              day=date.fromisoformat(parsed["stmt_date"]).day, id=card["id"])
 
 
@@ -999,7 +1002,7 @@ def create_card(db, name, profile="generic", last4="", issuer=""):
     if last4 and not 4 <= len(last4) <= 5:
         raise ValueError("Enter the last 4 digits of the card number (5 for American Express)")
     issuer = PROFILE_ISSUERS.get(profile) or re.sub(r"\s+", " ", issuer or "").strip() or "Other"
-    for r in query(db, "SELECT name, last4 FROM cards WHERE issuer=:issuer", issuer=issuer).mappings():
+    for r in query(db, "SELECT name, last4 FROM cards WHERE issuer=:issuer AND user_id=:uid", issuer=issuer).mappings():
         if last4 and r["last4"] and (r["last4"].endswith(last4) or last4.endswith(r["last4"])):
             raise ValueError(f"{issuer} ···{last4} is already here as {r['name']}")
     card = _insert_card(db, {"issuer": issuer, "last4": last4, "name": name, "profile": profile})
@@ -1040,7 +1043,7 @@ def update_card(db, card_id, name=None, status=None, **meta):
     if last4 != card["last4"] and last4 and not 4 <= len(last4) <= 5:     # an older card may hold fewer digits; only a change is checked
         raise ValueError("Enter the last 4 digits of the card number (5 for American Express)")
     if ("issuer" in meta or "last4" in meta) and last4:
-        for r in query(db, "SELECT name, last4 FROM cards WHERE issuer=:issuer AND id<>:id", issuer=issuer, id=card_id).mappings():
+        for r in query(db, "SELECT name, last4 FROM cards WHERE issuer=:issuer AND id<>:id AND user_id=:uid", issuer=issuer, id=card_id).mappings():
             if r["last4"] and (r["last4"].endswith(last4) or last4.endswith(r["last4"])):
                 raise ValueError(f"{issuer} ···{last4} is already {r['name']}")
     profile = meta.get("profile", card["profile"])
@@ -1060,28 +1063,28 @@ def update_card(db, card_id, name=None, status=None, **meta):
 
     fam = [c["id"] for c in family_of(db, card_id)]
     if name is not None:
-        query(db, "UPDATE cards SET name=:name WHERE id=:id", name=name, id=card_id)
-    query(db, "UPDATE cards SET issuer=:issuer, last4=:last4, network=:network, notes=:notes WHERE id=:id",
+        query(db, "UPDATE cards SET name=:name WHERE id=:id AND user_id=:uid", name=name, id=card_id)
+    query(db, "UPDATE cards SET issuer=:issuer, last4=:last4, network=:network, notes=:notes WHERE id=:id AND user_id=:uid",
          issuer=issuer, last4=last4, network=network, notes=notes, id=card_id)
     if status is not None:
         for i in fam:
-            query(db, "UPDATE cards SET status=:status WHERE id=:id", status=status, id=i)
+            query(db, "UPDATE cards SET status=:status WHERE id=:id AND user_id=:uid", status=status, id=i)
     for k in ("credit_limit", "annual_fee", "fee_waiver_spend"):      # fixed column names, never user input
         if k in meta:
             for i in fam:
-                query(db, f"UPDATE cards SET {k}=:v WHERE id=:id", v=meta[k], id=i)
+                query(db, f"UPDATE cards SET {k}=:v WHERE id=:id AND user_id=:uid", v=meta[k], id=i)
     if color is not None:
         for i in fam:
-            query(db, "UPDATE cards SET color=:color WHERE id=:id", color=color, id=i)
+            query(db, "UPDATE cards SET color=:color WHERE id=:id AND user_id=:uid", color=color, id=i)
     rescheme = profile != card["profile"]
     if rescheme:
         for i in fam:
-            query(db, "UPDATE cards SET profile=:profile, rates=:rates WHERE id=:id",
+            query(db, "UPDATE cards SET profile=:profile, rates=:rates WHERE id=:id AND user_id=:uid",
                  profile=profile, rates=json.dumps(PROFILES[profile]["rates"]), id=i)
     if "statement_day" in meta or "grace_days" in meta:
         sd, gd = meta.get("statement_day", card["statement_day"]), meta.get("grace_days", card["grace_days"])
         for c in account_cards(db, card["account_id"]):                  # one bill, one cycle
-            query(db, "UPDATE cards SET statement_day=:sd, grace_days=:gd, cycle_verified=1 WHERE id=:id", sd=sd, gd=gd, id=c["id"])
+            query(db, "UPDATE cards SET statement_day=:sd, grace_days=:gd, cycle_verified=1 WHERE id=:id AND user_id=:uid", sd=sd, gd=gd, id=c["id"])
     db.commit()
     if rescheme:
         reclassify_card(db, card_id)

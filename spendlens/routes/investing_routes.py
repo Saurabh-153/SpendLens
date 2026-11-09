@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 from datetime import date
 from accrual import auto_value, is_auto
@@ -5,6 +7,7 @@ from sip import apply_due_sips, set_sip
 import portfolio as pf
 import prices as px
 import ledger as led
+from equity import stock_dividends_in_fy
 from database import budget_for_month, current_month
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -14,8 +17,9 @@ from ._common import row_dict as _row_dict
 from sqlalchemy import func
 from db import failover
 from db.engine import SessionLocal, get_session
-from db.models import Holding, HoldingGroup, PortfolioGoal, PortfolioSnapshot
-from db.models.portfolio import AppPref, LedgerTransaction, SipLog
+from db.scope import user_of
+from db.models import Category, Holding, HoldingGroup, PortfolioGoal, PortfolioSnapshot, Subcategory
+from db.models.portfolio import AppPref, SipLog
 
 router = APIRouter(prefix="/spendlens/api", tags=["portfolio"])
 
@@ -126,21 +130,27 @@ class HoldingColumnsIn(BaseModel):
     hidden: list[str] = []
 
 
+def _columns_key(session):
+    """The owner (user 1) keeps the original key, so existing settings carry over; everyone else gets their own."""
+    uid = user_of(session)
+    return "holding_columns" if uid == 1 else f"holding_columns:{uid}"
+
+
 @router.get("/holding-columns")
 def get_holding_columns(session=Depends(get_session)):
     """Which Holdings-table columns show and in what order; empty until set in Admin (the UI then uses its own list)."""
-    row = session.get(AppPref, "holding_columns")
+    row = session.get(AppPref, _columns_key(session))
     return json.loads(row.value) if row and row.value else {"order": [], "hidden": []}
 
 
 @router.put("/holding-columns")
 def set_holding_columns(data: HoldingColumnsIn, session=Depends(get_session)):
     value = json.dumps({"order": data.order, "hidden": data.hidden})
-    row = session.get(AppPref, "holding_columns")
+    row = session.get(AppPref, _columns_key(session))
     if row:
         row.value = value
     else:
-        session.add(AppPref(key="holding_columns", value=value))
+        session.add(AppPref(key=_columns_key(session), value=value))
     session.commit()
     return {"ok": True}
 
@@ -307,13 +317,24 @@ def delete_holding(hid: int, session=Depends(get_session)):
     return {"ok": True}
 
 
+def csv_cell(value):
+    """A value as a spreadsheet will read it safely: text that starts like a formula (= + - @, tab, CR) gets a
+    leading apostrophe so Excel / Sheets show it instead of running it. Numbers stay numbers (a loss is -1234)."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return "" if value is None else value
+
+
 @router.get("/export/portfolio")
 def export_portfolio_csv(session=Depends(get_session)):
     rows = _all_holdings(session, Holding.asset_type, Holding.id)
-    lines = ["Name,Ticker,Type,Sector,Group,Qty,Buy Price,CMP,Invested,Present,P&L,P&L%"]
+    out = io.StringIO()
+    w = csv.writer(out, lineterminator="\n")   # quotes a name with a comma or a quote in it
+    w.writerow(["Name", "Ticker", "Type", "Sector", "Group", "Qty", "Buy Price", "CMP", "Invested", "Present", "P&L", "P&L%"])
     for r in rows:
-        lines.append(f"{r['name']},{r['ticker']},{r['asset_type']},{r['sector']},{r['grp']},{r['qty']},{r['buy_price']},{r['cmp']},{r['invested']},{r['present']},{r['pl']},{r['pl_pct']}%")
-    return Response("\n".join(lines), media_type="text/csv",
+        w.writerow([csv_cell(r[k]) for k in ("name", "ticker", "asset_type", "sector", "grp", "qty", "buy_price", "cmp",
+                                             "invested", "present", "pl")] + [f"{r['pl_pct']}%"])
+    return Response(out.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=portfolio.csv"})
 
 
@@ -322,6 +343,44 @@ class GoalIn(BaseModel):
     name: str
     target_amount: float
     target_year: int
+    kind: str | None = None  # large / small / recurring; left out, it follows the amount (pf.default_kind)
+    target_month: int | None = None
+    every_months: int = 12
+    end_year: int | None = None
+    escalation_pct: float = 0
+    category_id: int | None = None
+    subcategory_id: int | None = None
+
+
+def _goal_fields(session, data):
+    """Validated column values for a goal. A category link must be the user's own (the ORM scope hides others')."""
+    if not data.name.strip() or data.target_amount <= 0:
+        raise HTTPException(status_code=400, detail="Goal needs a name and a positive amount")
+    kind = data.kind or pf.default_kind(data.target_amount)
+    if kind not in pf.GOAL_KINDS:
+        raise HTTPException(status_code=400, detail="Goal kind must be large, small or recurring")
+    if data.target_month is not None and not 1 <= data.target_month <= 12:
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
+    out = {"name": data.name.strip(), "target_amount": data.target_amount, "target_year": data.target_year, "kind": kind,
+           "target_month": data.target_month, "every_months": 12, "end_year": None, "escalation_pct": 0,
+           "category_id": None, "subcategory_id": None}
+    if kind != "recurring":
+        return out
+    if not 1 <= data.every_months <= 120:
+        raise HTTPException(status_code=400, detail="A recurring expense repeats every 1 to 120 months")
+    if not -50 <= data.escalation_pct <= 100:
+        raise HTTPException(status_code=400, detail="Yearly rise must be between -50% and 100%")
+    if data.end_year is not None and data.end_year < data.target_year:
+        raise HTTPException(status_code=400, detail="End year cannot be before the first year")
+    if data.category_id is not None and session.get(Category, data.category_id) is None:
+        raise HTTPException(status_code=404, detail="Category not found")
+    if data.subcategory_id is not None:
+        sub = session.get(Subcategory, data.subcategory_id)
+        if sub is None or sub.category_id != data.category_id:
+            raise HTTPException(status_code=404, detail="Sub-category not found in that category")
+    out.update(every_months=data.every_months, end_year=data.end_year, escalation_pct=data.escalation_pct,
+               category_id=data.category_id, subcategory_id=data.subcategory_id)
+    return out
 
 
 class PlanIn(BaseModel):
@@ -358,9 +417,7 @@ def save_portfolio_plan(data: PlanIn, session=Depends(get_session)):
 @router.post("/portfolio/goals", status_code=201)
 def add_goal(data: GoalIn, session=Depends(get_session)):
     pf.ensure(session)
-    if not data.name.strip() or data.target_amount <= 0:
-        raise HTTPException(status_code=400, detail="Goal needs a name and a positive amount")
-    g = PortfolioGoal(name=data.name.strip(), target_amount=data.target_amount, target_year=data.target_year)
+    g = PortfolioGoal(**_goal_fields(session, data))
     session.add(g)
     session.commit()
     return {"id": g.id}
@@ -369,9 +426,11 @@ def add_goal(data: GoalIn, session=Depends(get_session)):
 @router.put("/portfolio/goals/{gid}")
 def update_goal(gid: int, data: GoalIn, session=Depends(get_session)):
     pf.ensure(session)
+    fields = _goal_fields(session, data)
     g = session.get(PortfolioGoal, gid)
     if g:
-        g.name, g.target_amount, g.target_year = data.name.strip(), data.target_amount, data.target_year
+        for k, v in fields.items():
+            setattr(g, k, v)
         session.commit()
     return {"ok": True}
 
@@ -444,10 +503,11 @@ def portfolio_kpis(session=Depends(get_session)):
              for s in session.query(PortfolioSnapshot).order_by(PortfolioSnapshot.snap_date).all()]
     rets = pf.snapshot_returns(snaps, today)
     goals = [_row_dict(g) for g in session.query(PortfolioGoal).order_by(PortfolioGoal.target_year, PortfolioGoal.id).all()]
-    sim, extra = pf.projection(groups, goals, plan["assumptions"], today)
+    sim, extra = pf.projection(groups, [g for g in goals if g["kind"] == "large"], plan["assumptions"], today)
     sip_total = sum(h.get("sip_amount") or 0 for h in held)
     income = budget_for_month(session, current_month())["income"]
     spend = pf.monthly_spend(session, today)
+    commitments = pf.commitments(session, goals, today, income, spend, sip_total)
     em = groups.get(pf.EMERGENCY, {}).get("present", 0)
     locked = sum(h["present"] for h in held if h["asset_type"] == "PF")
     ledger = led.summary(session, held)
@@ -456,7 +516,7 @@ def portfolio_kpis(session=Depends(get_session)):
         "total": round(total, 2), "invested": round(invested, 2), "pl": round(total - invested, 2),
         "pl_pct": round((total - invested) / invested * 100, 2) if invested else 0,
         "returns": rets,
-        "sip": {"monthly": round(sip_total), "yearly": round(sip_total * 12),
+        "sip": {"monthly": round(sip_total), "yearly": round(sip_total * 12), "by_mix": pf.sip_split(held),
                 "pct_of_portfolio": round(sip_total * 12 / total * 100, 1) if total else 0,
                 "savings_rate": round(sip_total / income * 100, 1) if income else None, "income": income},
         "safety": {"emergency": round(em, 2), "monthly_spend": round(spend),
@@ -467,11 +527,14 @@ def portfolio_kpis(session=Depends(get_session)):
         "concentration": pf.concentration(held),
         "performers": pf.performers(held),
         "fixed": pf.fixed_income(held),
+        "liquidity": pf.liquidity(held),
         "history": [{"date": s["snap_date"], "total": s["total"], "invested": s["invested"]} for s in snaps],
         "forecast": sim,
         "extra_sip_needed": extra,
+        "commitments": commitments,
         "ledger": {"xirr": ledger["xirr"]["portfolio"], "covered_pct": ledger["xirr"]["covered_pct"], "fy": ledger["current_fy"],
-                   "dividends": next((f["dividends"] for f in ledger["fy"] if f["fy"] == ledger["current_fy"]), 0),
+                   "dividends": round(next((f["dividends"] for f in ledger["fy"] if f["fy"] == ledger["current_fy"]), 0)
+                                      + stock_dividends_in_fy(session, ledger["current_fy"]), 2),
                    "realized": next((f["realized"] for f in ledger["fy"] if f["fy"] == ledger["current_fy"]), 0)},
         "prices": {"last_ok": last_ok.isoformat(timespec="seconds") if last_ok else None,
                    "auto_count": session.query(Holding).filter(Holding.auto_price == 1).count()},
@@ -498,7 +561,10 @@ def refresh_and_snapshot(only_if_stale=False):
             return None
         out = px.run_refresh(session)
         apply_due_sips(session)
-        pf.record_snapshot(session, _all_holdings(session, Holding.id))
+        for uid in [r[0] for r in session.query(Holding.user_id).distinct()]:  # one snapshot per user, from that user's own holdings
+            with SessionLocal() as mine:
+                mine.info["user_id"] = uid
+                pf.record_snapshot(mine, _all_holdings(mine, Holding.id))
         return out
     finally:
         session.close()
@@ -607,53 +673,3 @@ def prices_auto_map(session=Depends(get_session)):
     return {"mapped": mapped, "skipped": skipped}
 
 
-# ---------------------------------------------------------------- transaction ledger
-class TxIn(BaseModel):
-    holding_id: int | None = None
-    name: str = ""
-    tx_date: str
-    kind: str
-    qty: float = 0
-    price: float = 0
-    amount: float = 0
-    fees: float = 0
-    note: str = ""
-    apply: int = 0
-
-
-@router.get("/transactions")
-def list_transactions(holding_id: int = Query(None), kind: str = Query(None), fy: str = Query(None), limit: int = 500,
-                      session=Depends(get_session)):
-    rows = [_row_dict(t) for t in session.query(LedgerTransaction)
-            .order_by(LedgerTransaction.tx_date.desc(), LedgerTransaction.id.desc()).all()]
-    if holding_id:
-        rows = [r for r in rows if r["holding_id"] == holding_id]
-    if kind:
-        rows = [r for r in rows if r["kind"] == kind.upper()]
-    if fy:
-        rows = [r for r in rows if led.fy_of(r["tx_date"]) == fy]
-    return {"total": len(rows), "rows": [{**r, "fy": led.fy_of(r["tx_date"])} for r in rows[:limit]]}
-
-
-@router.post("/transactions", status_code=201)
-def add_transaction(data: TxIn, session=Depends(get_session)):
-    h = session.get(Holding, data.holding_id) if data.holding_id else None
-    if data.holding_id and not h:
-        raise HTTPException(404, "Holding not found")
-    try:
-        return {"id": led.add(session, data.model_dump(), _row_dict(h) if h else None)}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-
-
-@router.delete("/transactions/{tid}")
-def delete_transaction(tid: int, session=Depends(get_session)):
-    session.query(LedgerTransaction).filter(LedgerTransaction.id == tid).delete(synchronize_session=False)
-    session.commit()
-    return {"ok": True}
-
-
-@router.get("/ledger/summary")
-def ledger_summary(session=Depends(get_session)):
-    apply_due_sips(session)
-    return led.summary(session, _all_holdings(session, Holding.id))

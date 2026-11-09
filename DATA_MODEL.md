@@ -1,6 +1,6 @@
 # SpendLens data model
 
-SQLite schema (`spendlens/spendlens_v2.db`); the same schema runs on PostgreSQL when `DATABASE_URL` points there. See [README.md](README.md) for the rest of the project.
+One schema, two databases: PostgreSQL (when `DATABASE_URL` is set, normally from `.env.local`) and the SQLite file `spendlens/spendlens_v2.db`. One of them is the main database and the other holds a verified copy of it (see *Two databases* below); without `DATABASE_URL` the SQLite file is the only database. See [README.md](README.md) for the rest of the project.
 
 ```mermaid
 erDiagram
@@ -8,6 +8,7 @@ erDiagram
     reminder_categories ||--o{ reminders : "groups"
     categories ||--o{ reminders : "watched for the done tick"
     subcategories ||--o{ reminders : "optional narrower match"
+    categories ||--o{ portfolio_goals : "recurring expense, planned vs spent"
     categories ||--o{ subcategories : "has"
     categories ||--o{ category_targets : "target history"
     categories ||--o{ subcategory_rules : "note rules"
@@ -18,6 +19,10 @@ erDiagram
     holdings ||--o{ price_history : "daily price"
     holdings ||--o{ holding_snapshots : "daily value"
     holding_groups ||--o{ holdings : "grp (by name)"
+    equity_trades }o--o{ equity_events : "replayed together per account and symbol"
+    equity_dividends }o--o{ equity_trades : "qty checked against the replay"
+    broker_holdings }o--o{ equity_trades : "share counts reconciled"
+    equity_audit ||--o{ equity_trades : "import_id"
 
     categories {
         int id PK
@@ -149,6 +154,7 @@ erDiagram
         text grp "display group"
         real sip_amount "monthly SIP"
         int sip_day
+        int sip_reminder "1 = shown on the reminder calendar and in the feed (Alembic c4e6a9b2d7f1)"
         real rate "fixed interest % p.a."
         text start_date "opening date"
         text compounding "Q A or S"
@@ -162,6 +168,61 @@ erDiagram
         int auto_price "1 = daily price update"
         text price_date
         text price_note "last failure reason"
+    }
+    equity_trades {
+        int id PK
+        text account "user's demat label (SK, SS)"
+        text client_id "broker id from the file"
+        text symbol
+        text trade_date
+        text side "BUY SELL"
+        real qty
+        real price
+        text fingerprint "unique per user: re-imports add nothing"
+    }
+    equity_events {
+        int id PK
+        text account "empty = every account"
+        text symbol
+        text ex_date
+        text kind "SPLIT BONUS BUYBACK IPO TRANSFER_IN/OUT ADJUST DEMERGER MERGER RENAME"
+        real ratio_new
+        real ratio_old
+        real qty
+        real price "NULL = cost unknown"
+        text target_symbol
+        real cost_pct "demerger cost moved"
+        text source "manual / yahoo"
+    }
+    equity_dividends {
+        int id PK
+        text account
+        text symbol
+        text ex_date
+        real qty
+        real dps
+        real amount
+        text source "zerodha statement / yahoo"
+    }
+    broker_holdings {
+        int id PK
+        text account
+        text symbol
+        real qty
+        text as_of
+    }
+    equity_securities {
+        int id PK
+        text symbol
+        text yahoo_symbol "override"
+        real last_price
+        text price_date
+    }
+    equity_audit {
+        int id PK
+        text kind "tradebook dividends holdings refresh event"
+        text summary
+        text detail "JSON: what changed"
     }
     transactions {
         int id PK
@@ -217,8 +278,15 @@ erDiagram
         int id PK
         int user_id "default 1"
         text name
-        real target_amount
-        int target_year
+        real target_amount "for recurring: the amount in the first year"
+        int target_year "for recurring: the first year"
+        text kind "large / small / recurring (Alembic c7e2f9a4b1d3)"
+        int target_month "1-12, nullable; a year alone counts as June"
+        int every_months "recurring: repeat interval, default 12"
+        int end_year "recurring: last year, nullable"
+        real escalation_pct "recurring: yearly rise"
+        int category_id "recurring: nullable, planned vs spent (no FK)"
+        int subcategory_id "nullable"
     }
     portfolio_plan {
         int id PK "surrogate id (Alembic 0a3ec7a2c0e3)"
@@ -330,13 +398,15 @@ Notes on the model:
 - **Effective dating.** A month uses the latest `category_targets` / `budget_history` row whose `from_month` is on or before that month, so changing a target or salary never rewrites earlier months. Budget cap = `income − savings_amount`.
 - **Category lifecycle.** A category is shown in a month if that month is within `start_month`–`end_month` *or* it already has expenses that month, so totals always agree with the data. The same rules apply to sub-categories.
 - **Sub-categories** are a reporting label: a category's total always equals the sum of its sub-categories plus *Unassigned*.
-- **Portfolio tables.** `holdings` is the current position; `transactions` is the dated history (it may update a holding but deleting a row never reverses it); `sip_log` guarantees a SIP is applied once per month; `portfolio_snapshots` holds one net-worth row per user per day; `holding_snapshots` is the same idea per holding, so an individual stock or fund's value can be charted over time even though `holdings.cmp`/`qty` are overwritten in place on every price refresh; `price_history` / `price_runs` log the daily price job; `portfolio_goals` and `portfolio_plan` (key/value JSON) hold goals, target allocation and return assumptions. `holding_groups` is linked to `holdings.grp` by name, not by id.
+- **Portfolio tables.** `holdings` is the current position; `transactions` is the dated history (it may update a holding but deleting a row never reverses it); `sip_log` guarantees a SIP is applied once per month; `portfolio_snapshots` holds one net-worth row per user per day; `holding_snapshots` is the same idea per holding, so an individual stock or fund's value can be charted over time even though `holdings.cmp`/`qty` are overwritten in place on every price refresh; `price_history` / `price_runs` log the daily price job; `portfolio_goals` and `portfolio_plan` (key/value JSON) hold goals, target allocation and return assumptions. A goal's `kind` decides how it is paid: **large** goals are withdrawn from the corpus in the Monte Carlo (`portfolio.simulate`); **small** goals and **recurring** expenses (school fees, the trip home) are paid from one steady monthly set-aside that `portfolio.commitments` works out over the next 24 months, along with the one-time top-up, the share of the monthly surplus it uses and, for a recurring expense linked to a category, what was actually spent in its last cycle. None of that is stored. `holding_groups` is linked to `holdings.grp` by name, not by id.
+- **Stock ledger.** `equity_trades` holds every broker trade, keyed by a fingerprint so a re-uploaded or duplicated tradebook adds nothing; `client_id` stops one account's file being imported under another. Positions are never stored: `equity.py` replays trades with `equity_events` (corporate actions, plus a few built into the code for what Yahoo misses) into FIFO lots per account. `equity_dividends` rows from a broker statement replace that account's period on re-import; rows fetched from Yahoo (`dividend_agent.py`) only fill dates after the statements and are replaced when a later statement arrives. The share count on every statement ex-date and on the latest `broker_holdings` statement is checked against the replay (the Audit tab). `equity_audit` records what each import, refresh and event edit changed, so the broker files can be deleted afterwards.
 - **Exposure and tags.** `grp` is where a holding sits (and what targets are set against); `exposure` is one of Equity / Gold / Debt / Cash and is what the money is really invested in, so the exposure shares always add up to 100%. `tags` are optional extra labels (sector, theme) that may overlap; a holding also shows under a group filter named like one of its tags. The target Equity / Gold / Debt ratio, expected returns and time windows live in `portfolio_plan` under `mix_targets`, `mix_returns`, `mix_reach_years` and `mix_years`; Cash counts as Debt there. Older `exposure_targets` are still read as a fallback.
 - **Forecasts** are computed on request from `expenses`; nothing is stored (see `plan/spendlens-forecasting-ml-plan.md` for the planned `forecasts` tables).
 - **Billing accounts.** A card number and a bill are different things. `card_accounts` groups the cards that share one bill: an ICICI account list names several card numbers, and payments are posted under one yet settle all, so the due date, the payments and the *when to pay* answer belong to the account while spend and rewards belong to the card. Each card number is its own `cards` row. Which numbers are one *physical* card (a re-issue under a new number) is not stored: it is inferred from the dates on every read (`cards.lineage`), so it does not depend on upload order.
 - **Credit cards.** `cards` holds the card and its terms; `card_statements` one row per billing cycle, keyed by `period_to`, carrying both the cashback the statement *paid* (`cashback_reported`) and what the rules say it *should* have paid (`cashback_calc`) — the difference is shown on the dashboard rather than hidden. `card_txns` holds the transactions, de-duplicated by `row_hash` so re-importing an overlapping statement adds nothing, with `cls` (a reward class from the card's profile) deciding the rate. `card_merchant_rules` are your corrections to that classification; saving one re-applies the engine to all of history. `kind` separates what was *spent* from what the bank *billed*: net spend is purchases minus refunds plus EMI instalments, while interest, tax and fees are costs, not spend. **Card spend is not written into `expenses`**: the statements cover months that already have hand-entered expenses, so merging them would double count. Linking the two is a later, explicit step.
 - **Card perks.** `card_perks` is a card's benefits written down by hand (`spendlens/card_perks.py`): rewards, milestones, lounge access, fees, exclusions and caps, each with an optional yearly value (`value_yr`) and a `source`. A card is seeded once from its scheme's published terms (`cards.perks_seeded` guards the seed) with every row starting unconfirmed (`checked = 0`); after you confirm or edit one it is `checked = 1` and the list is yours. These rows are documentation only — nothing in the reward maths reads them. `cards.color` and `cards.sort_order` are display-only: a fixed colour per card (empty = auto-assigned) and the drag position on the Cards page.
 - **Reminder calendar.** `reminder_categories` and `reminders` hold what you set up (rent, EMI, school fees...); `reminder_settings` holds the evening "log expenses" nudge. Card statement/due dates (`cards.statement_day`, `due_day`, or statement day + `grace_days` when no due day is set, shown as an estimate) and SIP dates (`holdings.sip_day`) are **not stored**: they are read from `cards` and `holdings` each time, so editing a card or SIP changes the calendar and the feed immediately. A reminder's state is worked out per month: *done* when an expense exists in its linked category (and sub-category) that month, *missing* when the date has passed without one, *up* while it is still ahead. Suggestions (`GET /reminders/suggestions`) are computed from `expenses` and never stored; keeping one creates a normal reminder with `source_key` set so it is not offered twice. `GET /calendar.ics` renders everything as an iCalendar feed (all-day recurring events plus a daily floating-time nudge). **Holidays and vacations.** India and US public holidays are **not stored**: the `holidays` package (pinned in `spendlens/requirements.txt`) supplies them per month and they come back in `GET /reminders/calendar` as `holidays`. `vacations` are yours: coloured, inclusive date ranges, returned unclipped in every month they overlap, and included in the feed as all-day events (exclusive `DTEND`) under the `vacation` type. Holidays are not in the feed. **Drag to move.** `reminder_overrides` holds one month's occurrence of a reminder moved to another day (`PUT /reminders/{id}/move` with `scope=month`); `scope=all` changes `reminders.day` instead. The feed emits a moved occurrence as an extra VEVENT with the series UID and a `RECURRENCE-ID`. **Day trackers.** `trackers` (gym day, office day...) and the days you tick (`tracker_days`) are stored; their KPIs are **not**: `GET /reminders/calendar` works them out per month. Weeks are Monday rows clipped to the month, a week's goal is the weekly target scaled to that week's scheduled days (the tracker's weekdays, minus vacation days and public holidays it pauses on), and `tracker_cost_links` names the expense categories whose spending is averaged on ticked vs unticked days. `bill_reminder_id` turns a bill (a gym membership) into a cost per visit. Trackers are not in the feed.
+- **Two databases.** Both hold the same tables. The main one takes every save; the other is refreshed from it about 10 s after the last save, every 15 minutes and at shutdown, always as a complete copy checked table by table (`spendlens/db/replicate.py`, `db/mirror.py`): PostgreSQL → a freshly built SQLite file swapped in atomically, or SQLite → PostgreSQL in one transaction. Settings › Database switches which one is main (`POST /database/switch`), copying everything into it first; the choice is stored in `spendlens/database-mode.json`, not in either database. If PostgreSQL is the main database and can't be reached, the app reads the SQLite copy read-only until it is back. Housekeeping files next to the SQLite file, none of them data: `spendlens_v2.db.mirror.json` and `spendlens_v2.db.sync.json` (time and outcome of the last copy each way), `.spendlens_v2.db.template.db` (the empty schema each refresh starts from) and `spendlens_v2.pre-postgres.bak` (the SQLite database as it was before PostgreSQL took over). `holdings.sip_reminder` only hides a SIP from the reminders; Holdings still applies it.
 - **Migrations.** Alembic owns the schema (`alembic/`, `spendlens/db/models/`). `app.py` runs `upgrade head` through `db/migrate.py`'s `prepare_database()`; on an empty database (SQLite or PostgreSQL) the baseline revision creates every table that predates Alembic plus the starter data in `spendlens/db/seed.py`. `schema_migrations` is the record of the older numbered steps in `MIGRATIONS` (`database.py`): a database built by Alembic lists all of them as done, and they only ever run for an old SQLite file from before Alembic, which `database.init_db()` brings up to date before Alembic adopts it. The same schema runs on PostgreSQL (`DATABASE_URL`); there `categories.target_pct` and `category_targets.target_pct` are double precision, since those INTEGER-declared SQLite columns hold fractional targets. See the README's "Tests and migrations" section.
 - **`user_id`.** Every table with a surrogate `id` carries `user_id INTEGER DEFAULT 1`, added ahead of multi-user support so login does not need a schema rewrite. The key/value and effective-dated-by-month tables that used to need their primary keys widened first (`portfolio_plan`, `budget_history`) have been — both are now keyed on `(user_id, key-ish column)` via Alembic. `category_targets` and `price_history` didn't need it: they're scoped to a user through their `category_id`/`holding_id` FK, which is itself already owned by a user. No route actually filters by `user_id` yet, though — every query still implicitly runs as user 1 until real multi-user login is built.
 - A legacy `settings` table exists only so old databases can be migrated into `budget_history`; it's now keyed on `user_id` rather than a hardcoded `id = 1`, for the same reason as the tables above. The unused tables `users`, `rebalance_targets` and `price_alerts` were dropped by migration 2; nothing ever read them.

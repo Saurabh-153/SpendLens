@@ -51,10 +51,11 @@ class Holding(Base):
 
 class HoldingGroup(Base):
     __tablename__ = "holding_groups"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_holding_groups_user_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(default=1)
-    name: Mapped[str] = mapped_column(unique=True)
+    name: Mapped[str]
     sort_order: Mapped[int] = mapped_column(default=0)
     hidden_columns: Mapped[str] = mapped_column(default="")
 
@@ -96,6 +97,16 @@ class PortfolioGoal(Base):
     name: Mapped[str]
     target_amount: Mapped[float]
     target_year: Mapped[int]
+    # large: paid from the corpus in the simulation. small / recurring: paid from a monthly set-aside (portfolio.commitments).
+    kind: Mapped[str] = mapped_column(default="large", server_default="large")
+    target_month: Mapped[Optional[int]] = mapped_column(nullable=True)  # 1-12; a year alone counts as June
+    # recurring only: first due target_month/target_year at target_amount, then every N months, rising yearly, until end_year
+    every_months: Mapped[int] = mapped_column(default=12, server_default="12")
+    end_year: Mapped[Optional[int]] = mapped_column(nullable=True)
+    escalation_pct: Mapped[float] = mapped_column(default=0, server_default="0")
+    # optional link to the expense tracker, for planned vs spent (ownership checked by the route, no FK)
+    category_id: Mapped[Optional[int]] = mapped_column(nullable=True)
+    subcategory_id: Mapped[Optional[int]] = mapped_column(nullable=True)
 
 
 class PortfolioPlan(Base):

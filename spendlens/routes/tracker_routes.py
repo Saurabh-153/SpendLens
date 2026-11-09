@@ -16,8 +16,9 @@ from pydantic import BaseModel
 from sqlalchemy import func
 
 from db.engine import get_session
+from db.scope import user_of
 from db.models import Category, Expense, Reminder, Subcategory, Tracker, TrackerCostLink, TrackerDay
-from .reminder_routes import USER_ID, _bad, _clean_color, _clean_name, _falls_in, _month_holidays, _month_vacations, _parse_today
+from .reminder_routes import _bad, _clean_color, _clean_name, _falls_in, _month_holidays, _month_vacations, _parse_today
 
 router = APIRouter(prefix="/spendlens/api", tags=["trackers"])
 
@@ -86,7 +87,7 @@ def _tracker_view(session, t):
 
 def _tracker_or_404(session, tid):
     t = session.get(Tracker, tid)
-    if not t or t.user_id != USER_ID:
+    if not t or t.user_id != user_of(session):
         _bad("Tracker not found", 404)
     return t
 
@@ -115,7 +116,7 @@ def _clean_bill(session, rid):
     if rid is None:
         return None
     r = session.get(Reminder, rid)
-    if not r or r.user_id != USER_ID:
+    if not r or r.user_id != user_of(session):
         _bad("bill_reminder_id: reminder not found")
     return rid
 
@@ -145,7 +146,7 @@ def _set_links(session, tid, pairs):
 
 @router.get("/trackers")
 def list_trackers(session=Depends(get_session)):
-    rows = session.query(Tracker).filter(Tracker.user_id == USER_ID).order_by(Tracker.sort_order, Tracker.id).all()
+    rows = session.query(Tracker).filter(Tracker.user_id == user_of(session)).order_by(Tracker.sort_order, Tracker.id).all()
     return [_tracker_view(session, t) for t in rows]
 
 
@@ -155,8 +156,8 @@ def create_tracker(data: TrackerCreate, session=Depends(get_session)):
                   weekdays=_clean_weekdays(data.weekdays), pause_on=_clean_pause(data.pause_on),
                   bill_reminder_id=_clean_bill(session, data.bill_reminder_id))
     pairs = _clean_links(session, data.cost_links)
-    order = (session.query(func.max(Tracker.sort_order)).filter(Tracker.user_id == USER_ID).scalar() or 0) + 1
-    t = Tracker(user_id=USER_ID, sort_order=order, **values)
+    order = (session.query(func.max(Tracker.sort_order)).filter(Tracker.user_id == user_of(session)).scalar() or 0) + 1
+    t = Tracker(user_id=user_of(session), sort_order=order, **values)
     session.add(t)
     session.flush()
     _set_links(session, t.id, pairs)
@@ -167,7 +168,7 @@ def create_tracker(data: TrackerCreate, session=Depends(get_session)):
 # Fixed path first: /trackers/{tid} would otherwise swallow it.
 @router.put("/trackers/reorder")
 def reorder_trackers(data: Reorder, session=Depends(get_session)):
-    rows = session.query(Tracker).filter(Tracker.user_id == USER_ID).order_by(Tracker.sort_order, Tracker.id).all()
+    rows = session.query(Tracker).filter(Tracker.user_id == user_of(session)).order_by(Tracker.sort_order, Tracker.id).all()
     by_id = {t.id: t for t in rows}
     if len(set(data.ids)) != len(data.ids) or any(i not in by_id for i in data.ids):
         _bad("ids must be distinct, existing tracker ids")
@@ -237,7 +238,7 @@ def tick_tracker_day(tid: int, day: str, data: DayTick, today: str = Query(None)
 
 def month_trackers(session, y, mon, today, holidays=None, vacations=None):
     """Every tracker with its ticks, scheduled days and KPIs for one month."""
-    trackers = session.query(Tracker).filter(Tracker.user_id == USER_ID).order_by(Tracker.sort_order, Tracker.id).all()
+    trackers = session.query(Tracker).filter(Tracker.user_id == user_of(session)).order_by(Tracker.sort_order, Tracker.id).all()
     if not trackers:
         return []
     n_days = calendar.monthrange(y, mon)[1]
@@ -248,7 +249,9 @@ def month_trackers(session, y, mon, today, holidays=None, vacations=None):
     vac_days = {d for d in range(1, n_days + 1) for v in vacations if v["start_date"] <= f"{prefix}{d:02d}" <= v["end_date"]}
 
     ticks = {}
-    for tid, d in session.query(TrackerDay.tracker_id, TrackerDay.date).filter(TrackerDay.date.like(f"{prefix}%")):
+    # tracker_days has no user_id: only this user's trackers' ticks
+    for tid, d in session.query(TrackerDay.tracker_id, TrackerDay.date).filter(
+            TrackerDay.tracker_id.in_([t.id for t in trackers]), TrackerDay.date.like(f"{prefix}%")):
         ticks.setdefault(tid, set()).add(int(d[8:10]))
 
     first_wd = date(y, mon, 1).weekday()

@@ -1,10 +1,12 @@
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pypdf>=5.0            # reading password-protected credit-card statements
-python-multipart>=0.0.9  # statement file uploads
+fastapi>=0.141.1      # 0.141+: refuses a JSON body sent without a Content-Type (cross-site form posts); brings a patched Starlette
+uvicorn[standard]>=0.30.0
+pypdf>=6.19           # reading password-protected credit-card statements
+python-multipart>=0.0.20  # (0.0.18+ fixes CVE-2024-53981) statement file uploads
 anthropic>=0.40       # optional: Claude fallback for unrecognised statement formats (needs ANTHROPIC_API_KEY)
-openpyxl>=3.1         # reading Excel activity exports (American Express)
+openpyxl>=3.1         # reading Excel activity exports (American Express) and MF portfolio disclosures
+xlrd==2.0.1           # old binary .xls MF portfolio disclosures (some AMC months are published that way)
 sqlalchemy>=2.0       # ORM layer; backs onto SQLite now, Postgres later via DATABASE_URL
 alembic>=1.13         # schema migrations, replaces the hand-rolled MIGRATIONS list in database.py
 holidays==0.105       # India and US public holidays shown on the reminder calendar
 psycopg[binary]==3.3.6  # PostgreSQL driver: used when DATABASE_URL / TEST_DATABASE_URL is postgresql+psycopg://
+bcrypt>=4.0         # password hashing for logins

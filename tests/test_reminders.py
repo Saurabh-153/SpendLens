@@ -14,7 +14,7 @@ import pytest
 from conftest import ROOT
 
 API = "/spendlens/api"
-HEAD = "e6a8c1d4f9b3"  # latest Alembic revision; the migration tests upgrade a real-data copy to it
+HEAD = "c3e5a7b9d1f2"  # latest Alembic revision; the migration tests upgrade a real-data copy to it
 _n = itertools.count(1)
 
 
@@ -451,7 +451,9 @@ def test_ics_includes_card_and_sip_dates(client, seeded_db, auto_rows):
 # ---------------------------------------------------------------- migration on a copy of the real database
 
 def _run(code, db_path):
-    env = dict(os.environ, SPENDLENS_DB=str(db_path))
+    # Only the scratch SQLite file: never inherit a DATABASE_URL, which would point Alembic at a real server.
+    env = {k: v for k, v in os.environ.items() if k not in ("DATABASE_URL", "SPENDLENS_MIRROR")}
+    env["SPENDLENS_DB"] = str(db_path)
     return subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env, capture_output=True, text=True)
 
 
@@ -504,8 +506,8 @@ def test_migration_hides_employer_pf_but_keeps_ppf_ssy_funds_and_rds(blank_db):
 
 def test_fund_label_drops_the_folio():
     from routes.reminder_routes import _fund_label
-    assert _fund_label("Axis Small Cap Fund (Folio: 910127264776)") == "Axis Small Cap Fund"
-    assert _fund_label("Parag Parikh Flexi Cap Fund (folio 17871570)") == "Parag Parikh Flexi Cap Fund"
+    assert _fund_label("Axis Small Cap Fund (Folio: 900000000001)") == "Axis Small Cap Fund"
+    assert _fund_label("Parag Parikh Flexi Cap Fund (folio 87654321)") == "Parag Parikh Flexi Cap Fund"
     assert _fund_label("PPF") == "PPF"
     assert _fund_label("RD - @7.25%") == "RD - @7.25%"
 

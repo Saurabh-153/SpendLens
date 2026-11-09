@@ -80,8 +80,13 @@ function Marker({ state, colour }: { state: OccurrenceState; colour: string }) {
 }
 
 /** The reminders calendar: a Monday-first month grid, a day panel, and the side cards (coming up, found in history, subscribe). */
-export default function ReminderCalendar({ headerExtra }: { headerExtra?: ReactNode }) {
-  const [month, setMonth] = useState(currentMonth)
+/** `month` / `onMonth`: when the page owns the month (the Expense page's bar), the calendar follows it and hides its own picker. */
+export default function ReminderCalendar({ headerExtra, month: shared, onMonth, bar }: {
+  headerExtra?: ReactNode; month?: string; onMonth?: (m: string) => void
+  bar?: (right: ReactNode) => ReactNode   // the page's month bar; the calendar's actions go on its right
+}) {
+  const [own, setOwn] = useState(currentMonth)
+  const month = shared ?? own
   const [data, setData] = useState<CalendarData | null>(null)
   const [nextData, setNextData] = useState<CalendarData | null>(null)
   const [cats, setCats] = useState<ReminderCategory[]>([])
@@ -123,7 +128,13 @@ export default function ReminderCalendar({ headerExtra }: { headerExtra?: ReactN
     try { await p; setMsg(ok ? { text: ok } : null); await load() } catch (e) { setMsg({ text: (e as Error).message, error: true }) }
   }
 
-  const changeMonth = (m: string) => { setMonth(m); setSelDay(m === currentMonth() ? new Date().getDate() : 1) }
+  const changeMonth = (m: string) => (onMonth ?? setOwn)(m)
+  const firstMonth = useRef(month)
+  useEffect(() => {   // a new month opens on today, or on the 1st
+    if (firstMonth.current === month) return
+    firstMonth.current = month
+    setSelDay(month === currentMonth() ? new Date().getDate() : 1)
+  }, [month])
   const toggleCat = (id: number) => setHidden(h => {
     const n = new Set(h)
     if (n.has(id)) n.delete(id); else n.add(id)
@@ -302,16 +313,25 @@ export default function ReminderCalendar({ headerExtra }: { headerExtra?: ReactN
     </button>
   )
 
+  const actions = (
+    <>
+      {msg && <span role={msg.error ? 'alert' : 'status'} style={{ fontSize: 12.5, color: msg.error ? T.negative : T.positive }}>{msg.text}</span>}
+      <button style={btn()} onClick={() => setManage(true)}>Manage trackers</button>
+      <button style={btn(true)} onClick={() => setEditor({ reminder: null, day: selDay })}>+ Add reminder</button>
+    </>
+  )
   return (
-    <div style={{ padding: '20px 24px' }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
-        {headerExtra}
-        <MonthPicker month={month} onChange={changeMonth} />
-        <div style={{ flex: 1 }} />
-        {msg && <span role={msg.error ? 'alert' : 'status'} style={{ fontSize: 12.5, color: msg.error ? T.negative : T.positive }}>{msg.text}</span>}
-        <button style={btn()} onClick={() => setManage(true)}>Manage trackers</button>
-        <button style={btn(true)} onClick={() => setEditor({ reminder: null, day: selDay })}>+ Add reminder</button>
-      </div>
+    <>
+    {bar?.(actions)}
+    <div style={{ padding: bar ? '14px 24px 20px' : '20px 24px' }}>
+      {!bar && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
+          {headerExtra}
+          {!shared && <MonthPicker month={month} onChange={changeMonth} />}
+          <div style={{ flex: 1 }} />
+          {actions}
+        </div>
+      )}
 
       <TrackerKpis trackers={trackers} />
 
@@ -496,6 +516,7 @@ export default function ReminderCalendar({ headerExtra }: { headerExtra?: ReactN
         </Modal>
       )}
     </div>
+    </>
   )
 }
 

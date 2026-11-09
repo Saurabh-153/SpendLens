@@ -3,8 +3,9 @@ import CardAdviceCard from './CardAdvice'
 import { getCardsOverview, saveCardOrder, type CardsOverview, type OverviewCard } from '../api'
 import { T, fmt, fmtFull } from '../theme'
 import { Card, label } from './ui'
-import { cardColor, CardChip } from '../cardColors'
-import CreditCardFace from './CreditCardFace'
+import { cardColor } from '../cardColors'
+import CreditCardFace, { cq } from './CreditCardFace'
+import KpiSection, { LineItem } from './KpiSection'
 
 const GAP = 2
 
@@ -61,7 +62,14 @@ export default function CardsOverviewPage({ onPick }: { onPick: (id: number) => 
   return (
     <div>
       {/* The headline numbers */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12, marginBottom: 16 }}>
+      <div style={{ marginBottom: 16 }}>
+      <KpiSection storageKey="spendlens.cardKpisCompact" label="All cards" line={<>
+        <LineItem label="Spent, all time">{fmt(d.totals.spend)}</LineItem>
+        <LineItem label="Last 12 months">{fmt(d.totals.spend_12m)}</LineItem>
+        <LineItem label="Fees and interest" color={totalCost ? T.warn : undefined}>{fmtFull(totalCost)}</LineItem>
+        {nextPay && <LineItem label="Next bill">{dayLabel(nextPay.pay_on)}{nextPay.days_to_pay >= 0 ? ` · in ${nextPay.days_to_pay} days` : ''}</LineItem>}
+      </>}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12 }}>
         {[
           { name: 'Spent, all time', value: fmt(d.totals.spend), sub: `across ${d.totals.cards} cards`, c: T.accent },
           { name: 'Last 12 months', value: fmt(d.totals.spend_12m), sub: 'net of refunds', c: T.accent2 },
@@ -71,17 +79,19 @@ export default function CardsOverviewPage({ onPick }: { onPick: (id: number) => 
             sub: nextPay ? `${nextPay.days_to_pay >= 0 ? `in ${nextPay.days_to_pay} days` : 'passed'} · ${nextPay.cards.join(' + ')}` : 'no billing cycle yet', c: T.positive,
           },
         ].map(k => (
-          <Card key={k.name} style={{ padding: '14px 18px', borderTop: `3px solid ${k.c}` }}>
+          <Card key={k.name} style={{ padding: '14px 18px' }}>
             <div style={label}>{k.name}</div>
             <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: 24, fontWeight: 700, margin: '4px 0 2px' }}>{k.value}</div>
             <div style={{ fontSize: 12, color: T.muted }}>{k.sub}</div>
           </Card>
         ))}
       </div>
+      </KpiSection>
+      </div>
 
       {/* Each card */}
       {error && <div style={{ color: T.negative, fontSize: 12.5, marginBottom: 10 }}>Could not save the card order: {error}</div>}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 16, marginBottom: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 16, marginBottom: 16 }}>
         {d.cards.map(c => (
           <div key={c.id} draggable title="Drag to reorder"
             onDragStart={e => { dragId.current = c.id; e.dataTransfer.effectAllowed = 'move' }}
@@ -99,7 +109,7 @@ export default function CardsOverviewPage({ onPick }: { onPick: (id: number) => 
       <Card style={{ padding: 20, marginBottom: 16 }}>
         {title('Spend by financial year', 'net of refunds')}
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 12, fontSize: 11.5, color: T.muted }}>
-          {d.cards.map(c => <span key={c.id} style={{ opacity: c.status === 'closed' ? 0.5 : 1 }}><CardChip color={c.color} name={c.name} size={16} />{c.name}{c.status === 'closed' ? ' (closed)' : ''}</span>)}
+          {d.cards.map(c => <span key={c.id} style={{ opacity: c.status === 'closed' ? 0.5 : 1 }}><i style={{ display: 'inline-block', width: 9, height: 9, borderRadius: '50%', background: cardColor(c.color), marginRight: 7 }} />{c.name}{c.status === 'closed' ? ' (closed)' : ''}</span>)}
         </div>
         {d.years.map(y => (
           <div key={y.fy} style={{ display: 'grid', gridTemplateColumns: '64px 1fr 84px', gap: 12, alignItems: 'center', padding: '5px 0', fontSize: 12.5 }}>
@@ -154,7 +164,11 @@ export default function CardsOverviewPage({ onPick }: { onPick: (id: number) => 
             </div>
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 15, fontWeight: 700 }}>Pay {p.issued ? `${fmtFull(p.expected)} on ` : ''}{dayLabel(p.pay_on)}</div>
-              <div style={{ fontSize: 11.5, color: T.muted }}>{p.days_to_pay >= 0 ? `in ${p.days_to_pay} days` : 'date passed'}</div>
+              <span style={{
+                display: 'inline-block', marginTop: 4, fontSize: 11, fontWeight: 600, padding: '2px 9px', borderRadius: 999,
+                color: p.days_to_pay >= 0 && p.days_to_pay > 7 ? T.muted : T.warn,
+                background: `color-mix(in srgb, ${p.days_to_pay >= 0 && p.days_to_pay > 7 ? T.muted : T.warn} 16%, transparent)`,
+              }}>{p.days_to_pay >= 0 ? `in ${p.days_to_pay} days` : 'date passed'}</span>
             </div>
           </div>
         ))}
@@ -170,36 +184,44 @@ export default function CardsOverviewPage({ onPick }: { onPick: (id: number) => 
 function CardTile({ c, today, color, onPick }: { c: OverviewCard; today: string; color: string; onPick: (id: number) => void }) {
   const use = idle(c.through, today)
   const was = c.numbers.slice(0, -1)
+  const tone = c.status === 'closed' ? T.muted : use.retired ? T.warn : use.text === 'in use' ? T.positive : T.muted
+  const key = { fontSize: cq(2.2, 8, 9.5), letterSpacing: '0.08em', textTransform: 'uppercase', color: T.muted, fontWeight: 600 } as const
+  const footText = [
+    c.credit_limit ? `Limit ${fmt(c.credit_limit)}` : 'Limit not set',
+    c.annual_fee ? `Fee ${fmt(c.annual_fee)}${c.fee_waiver_spend ? `, waived at ${fmt(c.fee_waiver_spend)}` : ''}` : '',
+    `${monthYear(c.since)} to ${monthYear(c.through)}`,
+    was.length > 0 ? `earlier ···${was.slice().reverse().join(', ···')}` : '',
+    c.shared_with.length > 0 ? `shares bill with ${c.shared_with.join(', ')}` : '',
+  ].filter(Boolean).join(' · ')
   return (
     <CreditCardFace color={color} issuer={c.issuer} name={c.name} last4={c.numbers[c.numbers.length - 1]} network={c.network} status={c.status} onClick={() => onPick(c.id)}
       hero={
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, width: '100%' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: '3cqw' }}>
           <div>
-            <div style={{ ...label, fontSize: 9.5, color: 'inherit', opacity: 0.65 }}>Last 12 months</div>
-            <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: 28, fontWeight: 700, lineHeight: 1.1 }}>{fmt(c.spend_12m)}</div>
+            <div style={key}>Last 12 months</div>
+            <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: cq(6.4, 16, 26), fontWeight: 700, lineHeight: 1.1, letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums' }}>{fmt(c.spend_12m)}</div>
           </div>
           <div style={{ textAlign: 'right' }}>
-            <div style={{ ...label, fontSize: 9.5, color: 'inherit', opacity: 0.65 }}>Spent, all time</div>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>{fmt(c.spend)}</div>
+            <div style={key}>Spent, all time</div>
+            <div style={{ fontSize: cq(3.5, 11, 14.5), fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmt(c.spend)}</div>
           </div>
         </div>
+      }
+      footer={
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '2cqw', fontSize: cq(2.4, 8.5, 10.5), color: T.muted }}>
+          <span title={footText} style={{ minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{footText}</span>
+          <span style={{ whiteSpace: 'nowrap', fontWeight: 600, padding: '0.15em 0.75em', borderRadius: 999, color: tone, background: `color-mix(in srgb, ${tone} 16%, transparent)` }}>
+            {c.status === 'closed' ? 'Closed' : use.text === 'in use' ? 'In use' : use.text}
+          </span>
+        </div>
       }>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '6px 10px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '2cqw' }}>
         <Stat name="Transactions" value={`${c.transactions}`} sub={`avg ${fmt(c.avg_ticket)}`} />
         <Stat name="On EMI" value={c.emi ? fmt(c.emi) : '—'} sub={c.emi ? `${pct1(c.emi_share)} of spend` : undefined} />
-        <Stat name="Fees and interest" value={c.fees ? fmtFull(c.fees) : '—'} sub={c.fees ? `${pct1(c.fees_share)} of spend` : undefined} warn={c.fees_share > 1} />
+        <Stat name="Fees & interest" value={c.fees ? fmtFull(c.fees) : '—'} sub={c.fees ? `${pct1(c.fees_share)} of spend` : undefined} warn={c.fees_share > 1} />
         {c.rewards
           ? <Stat name={c.earned_is_estimate ? 'Rewards (est.)' : 'Cashback'} value={fmtFull(c.earned)} />
           : <Stat name="Top merchant" value={c.top_merchant ? c.top_merchant.name : '—'} sub={c.top_merchant ? fmt(c.top_merchant.spend) : undefined} />}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 9.5, opacity: 0.7, marginTop: 7, lineHeight: 1.35 }}>
-        <span>
-          {c.credit_limit ? `Limit ${fmt(c.credit_limit)}` : 'Limit not set'}{c.annual_fee ? ` · Fee ${fmt(c.annual_fee)}${c.fee_waiver_spend ? `, waived at ${fmt(c.fee_waiver_spend)}` : ''}` : ''}
-          {' · '}{monthYear(c.since)} to {monthYear(c.through)}
-          {was.length > 0 && <> · earlier ···{was.slice().reverse().join(', ···')}</>}
-          {c.shared_with.length > 0 && <> · shares bill with {c.shared_with.join(', ')}</>}
-        </span>
-        <span style={{ whiteSpace: 'nowrap', fontWeight: use.retired ? 700 : 400, color: use.retired ? T.warn : undefined }}>{c.status === 'closed' ? 'closed' : use.text}</span>
       </div>
     </CreditCardFace>
   )
@@ -208,9 +230,9 @@ function CardTile({ c, today, color, onPick }: { c: OverviewCard; today: string;
 function Stat({ name, value, sub, warn }: { name: string; value: string; sub?: string; warn?: boolean }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={{ ...label, fontSize: 8.5, color: 'inherit', opacity: 0.65, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
-      <div style={{ fontSize: 12.5, fontWeight: 700, color: warn ? T.warn : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={value}>{value}</div>
-      {sub && <div style={{ fontSize: 9, opacity: 0.7, whiteSpace: 'nowrap' }}>{sub}</div>}
+      <div style={{ fontSize: cq(2, 7.5, 9), letterSpacing: '0.06em', textTransform: 'uppercase', color: T.muted, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
+      <div style={{ fontSize: cq(3.1, 10, 12.5), fontWeight: 700, color: warn ? T.warn : 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }} title={value}>{value}</div>
+      <div style={{ fontSize: cq(2.2, 8, 9.5), color: T.muted, whiteSpace: 'nowrap', minHeight: '1.2em' }}>{sub}</div>
     </div>
   )
 }

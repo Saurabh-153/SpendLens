@@ -8,7 +8,7 @@ import { displayName, titleCase } from '../names'
 
 export type SortKey = 'present' | 'invested' | 'pl' | 'pl_pct' | 'name'
 export interface GroupTotals { name: string; items: Holding[]; invested: number; present: number; pl: number; pct: number }
-interface Ctx { group: string; total: number }
+interface Ctx { group: string; total: number; color?: string }
 
 export interface Column {
   key: string
@@ -61,6 +61,50 @@ const buyZone = (h: Holding) => {
 const lastPrice = (h: Holding) => h.asset_type === 'MF' ? (h.nav > 0 ? `NAV ₹${money(h.nav, 4)}` : '')
   : ['EQ', 'GOLD'].includes(h.asset_type) && h.cmp > 0 ? `@ ₹${money(h.cmp)}` : ''
 
+const pill = (c: string): CSSProperties => ({ display: 'inline-block', fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 999, whiteSpace: 'nowrap', color: c, background: `color-mix(in srgb, ${c} 16%, transparent)` })
+
+/** Gain in rupees with the return as a pill (red-toned below -25%). */
+function GainCell({ pl, p }: { pl: number; p: number }) {
+  return (
+    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+      <b style={{ color: pnlColor(pl), fontWeight: 600 }}>{signed(pl)}</b>
+      <span style={pill(pnlColor(p))}>{pct(p)}</span>
+    </div>
+  )
+}
+
+/** An amount with a thin bar and the percentage it is of the whole portfolio. */
+function WithShare({ value, part, total }: { value: string; part: number; total: number }) {
+  const p = total ? (part / total) * 100 : 0
+  return (
+    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+      <span>{value}</span>
+      <span style={{ width: 84, height: 4, borderRadius: 2, background: T.border, overflow: 'hidden' }}>
+        <i style={{ display: 'block', width: `${Math.min(100, p * 2.5)}%`, height: '100%', background: T.accent, borderRadius: 2 }} />
+      </span>
+      <span style={{ ...small, color: T.muted, fontSize: 11 }}>{p.toFixed(1)}%</span>
+    </div>
+  )
+}
+
+/** 52-week low to high as a track: the dot is today's price, the bar is your average buy price. */
+function RangeBar({ h }: { h: Holding }) {
+  const span = h.week52_high - h.week52_low || 1
+  const at = (v: number) => `${Math.max(0, Math.min(100, ((v - h.week52_low) / span) * 100))}%`
+  const buy = buyPrice(h)
+  return (
+    <div style={{ width: 130, marginLeft: 'auto', textAlign: 'left' }} title={`Today ₹${money(h.cmp)}${buy != null ? ` · your average buy ₹${money(buy)}` : ''}`}>
+      <div style={{ position: 'relative', height: 4, borderRadius: 2, background: T.border, margin: '8px 0 4px' }}>
+        {buy != null && <b style={{ position: 'absolute', top: -4, left: at(buy), width: 4, height: 12, borderRadius: 2, background: T.text, transform: 'translateX(-2px)' }} />}
+        <u style={{ position: 'absolute', top: -2, left: at(h.cmp), width: 8, height: 8, borderRadius: '50%', border: `2px solid ${T.accent}`, background: T.surface, transform: 'translateX(-4px)', textDecoration: 'none' }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.muted }}>
+        <span>{money(h.week52_low, 0)}</span><span>{money(h.week52_high, 0)}</span>
+      </div>
+    </div>
+  )
+}
+
 function holdingMeta(h: Holding, group: string) {
   const { folio } = displayName(h)
   const bank = ['FD', 'PF', 'CASH'].includes(h.asset_type) && h.sector && h.sector.toLowerCase() !== group.toLowerCase() ? titleCase(h.sector) : ''
@@ -76,12 +120,14 @@ export const COLUMNS: Column[] = [
     cellStyle: () => ({ textAlign: 'left', paddingLeft: 32, whiteSpace: 'normal', maxWidth: 360 }),
     cell: (h, c) => {
       const meta = holdingMeta(h, c.group)
-      return <><div style={{ fontWeight: 500 }} title={h.name}>{displayName(h).name}</div>{meta && <div style={sub}>{meta}</div>}</>
+      const soon = h.maturity && h.present > 0 && new Date(h.maturity + 'T00:00:00').getTime() - Date.now() <= 90 * 864e5
+      return <><div style={{ fontWeight: 500 }} title={h.name}>{displayName(h).name}{soon && <span style={{ ...pill(T.warn), marginLeft: 8 }}>{new Date(h.maturity + 'T00:00:00').getTime() < Date.now() ? 'matured' : 'matures'} {monthYear(h.maturity)}</span>}</div>{meta && <div style={sub}>{meta}</div>}</>
     },
     groupStyle: { textAlign: 'left', fontWeight: 700 },
     groupCell: (g, c) => <>
       <span style={{ display: 'inline-block', width: 14, color: T.muted, fontSize: 10 }}>{c.expanded ? '▼' : '▶'}</span>
-      {g.name} <span style={{ color: T.muted, fontWeight: 400, fontSize: 12 }}>{g.items.length} · {c.total ? ((g.present / c.total) * 100).toFixed(1) : 0}%</span>
+      {c.color && <i style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 3, background: c.color, marginRight: 8 }} />}
+      {g.name} <span style={{ color: T.muted, fontWeight: 400, fontSize: 12, marginLeft: 6 }}>{g.items.length} holdings</span>
     </>,
   },
   {
@@ -101,7 +147,7 @@ export const COLUMNS: Column[] = [
   {
     key: 'range', wide: true, heads: [{ label: '52W Low | High' }], when: rows => rows.some(h => h.asset_type === 'EQ'),
     cellStyle: () => ({ color: T.muted }),
-    cell: h => h.asset_type === 'EQ' && h.week52_high > 0 && <>₹{money(h.week52_low)} <span style={{ opacity: 0.5 }}>|</span> {money(h.week52_high)}</>,
+    cell: h => h.asset_type === 'EQ' && h.week52_high > 0 && <RangeBar h={h} />,
   },
   {
     key: 'invested', wide: true, heads: [{ label: 'Amount Invested', sort: 'invested' }],
@@ -110,15 +156,14 @@ export const COLUMNS: Column[] = [
   },
   {
     key: 'value', heads: [{ label: 'Current Value', sort: 'present' }],
-    cellStyle: () => ({ fontWeight: 600 }), cell: h => fmt(h.present),
+    cellStyle: () => ({ fontWeight: 600 }), cell: (h, c) => <WithShare value={fmt(h.present)} part={h.present} total={c.total} />,
     cellTip: (h, c) => `${c.total ? ((h.present / c.total) * 100).toFixed(1) : 0}% of portfolio`,
-    groupStyle: { fontWeight: 700 }, groupCell: g => fmt(g.present),
+    groupStyle: { fontWeight: 700 }, groupCell: (g, c) => <WithShare value={fmt(g.present)} part={g.present} total={c.total} />,
   },
   {
     key: 'gain',
     heads: [{ label: 'Gain/Loss ₹', sort: 'pl', title: 'Sort by gain in ₹' }, { label: 'Return %', sort: 'pl_pct', title: 'Sort by gain in %' }],
-    cellStyle: h => ({ color: pnlColor(h.pl), fontWeight: 600 }),
-    cell: h => <>{signed(h.pl)}<div style={small}>{pct(h.pl_pct)}</div></>,
-    groupCell: g => <span style={{ color: pnlColor(g.pl), fontWeight: 600 }}>{signed(g.pl)}<div style={small}>{pct(g.pct)}</div></span>,
+    cell: h => h.asset_type === 'CASH' ? <span style={{ color: T.muted }}>–</span> : <GainCell pl={h.pl} p={h.pl_pct} />,
+    groupCell: g => <GainCell pl={g.pl} p={g.pct} />,
   },
 ]

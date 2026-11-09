@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { createHolding, deleteHolding, getHoldingColumns, getHoldingGroups, getHoldings, portfolioCsvUrl, updateHolding, type ColumnLayout, type Holding, type HoldingGroup, type HoldingInput } from '../api'
-import { HOLDING_TYPES, T, fmt, fmtFull, pnlColor, signed } from '../theme'
+import { createHolding, deleteHolding, getExposure, getHoldingColumns, getHoldingGroups, getHoldings, getPortfolioKpis, portfolioCsvUrl, refreshPrices, updateHolding, type ColumnLayout, type ExposureData, type PortfolioKpis, type Holding, type HoldingGroup, type HoldingInput } from '../api'
+import { HOLDING_TYPES, T, fmtFull, pnlColor, signed } from '../theme'
 import { displayName } from '../names'
-import { layoutColumns, monthYear, pct, tagsOf, td, type SortKey } from './holdingColumns'
-import { btn, card, Field, input, label, Modal } from './ui'
-import { CardChip, paletteAt } from '../cardColors'
+import { layoutColumns, monthYear, tagsOf, td, type SortKey } from './holdingColumns'
+import { btn, card, Field, input, Modal } from './ui'
+import { paletteAt } from '../cardColors'
+import HoldingsKpis, { Allocation } from './HoldingsKpis'
+import AllocationTab from './AllocationTab'
+import OutlookTab from './OutlookTab'
+import { useNarrow } from '../useNarrow'
+import HoldingsSide from './HoldingsSide'
 
 // MF / FD / PF / cash are entered as amounts (stored as qty 1 × amounts); EQ and gold as quantity × price.
 const DIRECT = ['MF', 'FD', 'PF', 'CASH']
@@ -12,26 +17,11 @@ const OTHER = 'Others'
 
 const grpOf = (h: Holding) => h.grp || OTHER
 
-function useNarrow(px = 700) {
-  const q = `(max-width:${px}px)`
-  const [narrow, setNarrow] = useState(() => window.matchMedia(q).matches)
-  useEffect(() => {
-    const m = window.matchMedia(q), f = () => setNarrow(m.matches)
-    m.addEventListener('change', f)
-    return () => m.removeEventListener('change', f)
-  }, [q])
-  return narrow
-}
-
-function Kpi({ name, children, sub }: { name: string; children: React.ReactNode; sub?: React.ReactNode }) {
-  return (
-    <div style={{ ...card, padding: '16px 18px' }}>
-      <div style={label}>{name}</div>
-      <div style={{ fontFamily: 'var(--font-display, inherit)', fontSize: 26, fontWeight: 700, marginTop: 6, letterSpacing: -0.3 }}>{children}</div>
-      {sub && <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{sub}</div>}
-    </div>
-  )
-}
+type Tab = 'portfolio' | 'allocation' | 'outlook'
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'portfolio', label: 'Holdings & Returns' }, { id: 'allocation', label: 'Asset Mix & Rebalancing' }, { id: 'outlook', label: 'Goals & Forecast' },
+]
+const tabFromUrl = (): Tab => { const t = new URLSearchParams(location.search).get('tab'); return t === 'allocation' || t === 'outlook' ? t : 'portfolio' }
 
 export default function Holdings() {
   const [holdings, setHoldings] = useState<Holding[]>([])
@@ -45,13 +35,26 @@ export default function Holdings() {
   const [groupNames, setGroupNames] = useState<string[]>([])
   const [groupInfo, setGroupInfo] = useState<HoldingGroup[]>([])
   const [layout, setLayout] = useState<ColumnLayout>({ order: [], hidden: [] })
+  const [kpis, setKpis] = useState<PortfolioKpis | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [ex, setEx] = useState<ExposureData | null>(null)
+  const [tab, setTab] = useState<Tab>(tabFromUrl)
   const narrow = useNarrow()
+  const stacked = useNarrow(1040)   // the side column drops below the table on small screens
 
   const load = useCallback(() => {
     getHoldings().then(h => { setHoldings(h); setError('') }).catch(e => setError(e.message))
     getHoldingGroups().then(g => { setGroupNames(g.groups.map(x => x.name)); setGroupInfo(g.groups) }).catch(() => {})
     getHoldingColumns().then(setLayout).catch(() => {})
   }, [])
+  // the KPI call also applies due SIPs and stores today's snapshot, so it follows the holdings rather than running on its own
+  useEffect(() => { getPortfolioKpis().then(setKpis).catch(() => {}); getExposure().then(setEx).catch(() => {}) }, [holdings])
+  const pickTab = (t: Tab) => {
+    const u = new URL(location.href)
+    if (t === 'portfolio') u.searchParams.delete('tab'); else u.searchParams.set('tab', t)
+    history.replaceState(null, '', u)
+    setTab(t)
+  }
   useEffect(load, [load])
   const run = (p: Promise<unknown>) => p.then(load).catch(e => setError(e.message))
 
@@ -118,23 +121,43 @@ export default function Holdings() {
   const cols = layoutColumns(layout).filter(c => c.locked || !visibleGroups.length || !visibleGroups.every(g => hiddenIn(c.key, g.name))).filter(c => (!narrow || !c.wide) && (!c.when || c.when(allRows)))
 
   return (
-    <div style={{ padding: 20 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12, marginBottom: 14 }}>
-        <Kpi name="Net worth" sub={<>Invested {fmt(totals.invested)}{totals.sip > 0 && <> · SIP {fmt(totals.sip)}/mo</>}</>}>{fmt(totals.present)}</Kpi>
-        <Kpi name="Total gain" sub={`${holdings.length} holdings`}>
-          <span style={{ color: pnlColor(totals.pnl) }}>{signed(totals.pnl)}</span>{' '}
-          <span style={{ fontSize: 15, fontWeight: 600, color: pnlColor(totals.pnl) }}>{pct(totals.pct)}</span>
-        </Kpi>
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', gap: '8px 14px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <h1 style={{ fontSize: 20, fontWeight: 700 }}>Holdings</h1>
+        {kpis && kpis.prices.auto_count > 0 && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, color: T.muted, border: `1px solid ${T.border}`, background: T.surface, borderRadius: 999, padding: '4px 10px' }}>
+            <i style={{ width: 7, height: 7, borderRadius: '50%', background: T.positive }} />
+            {kpis.prices.auto_count} holdings priced daily{kpis.prices.last_ok ? ` · updated ${new Date(kpis.prices.last_ok).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}` : ''}
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        {error && <span style={{ color: T.negative, fontSize: 12 }}>{error}</span>}
+        <button style={{ ...btn(), opacity: refreshing ? 0.6 : 1 }} disabled={refreshing}
+          onClick={() => { setRefreshing(true); refreshPrices().then(load).catch(e => setError(e.message)).finally(() => setRefreshing(false)) }}>{refreshing ? 'Refreshing…' : 'Refresh prices'}</button>
+        <a href={portfolioCsvUrl} style={{ ...btn(), textDecoration: 'none' }}>↓ CSV</a>
+        <button style={btn(true)} onClick={() => setEditing('new')}>+ Add</button>
       </div>
 
-      {notes.length > 0 && (
-        <div style={{ ...card, padding: '12px 16px', marginBottom: 14, fontSize: 12.5 }}>
-          <div style={{ ...label, marginBottom: 6 }}>Worth a look</div>
-          {notes.map(n => <div key={n} style={{ color: T.muted, padding: '2px 0' }}><span style={{ color: T.warn }}>●</span> {n}</div>)}
-        </div>
-      )}
+      <HoldingsKpis k={kpis} ex={ex} holdings={holdings} totals={totals} />
 
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+      <div role="tablist" style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${T.border}`, overflowX: 'auto' }}>
+        {TABS.map(t => (
+          <button key={t.id} role="tab" aria-selected={tab === t.id} onClick={() => pickTab(t.id)} style={{
+            border: 'none', background: 'transparent', padding: '10px 16px', fontSize: 14, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', marginBottom: -1,
+            color: tab === t.id ? T.text : T.muted, borderBottom: `2px solid ${tab === t.id ? T.accent : 'transparent'}`,
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {tab === 'allocation' && <AllocationTab k={kpis} />}
+      {tab === 'outlook' && <OutlookTab k={kpis} />}
+
+      {tab === 'portfolio' && (
+      <div style={{ display: 'grid', gridTemplateColumns: stacked ? 'minmax(0, 1fr)' : 'minmax(0, 1fr) 300px', gap: 16, alignItems: 'start' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+      {ex && ex.total > 0 && <Allocation ex={ex} />}
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         {['ALL', ...groups.map(g => g.name)].map(name => {
           const active = group === name
           const n = name === 'ALL' ? holdings.length : groups.find(g => g.name === name)!.items.length
@@ -142,22 +165,18 @@ export default function Holdings() {
           const color = paletteAt(Math.max(groupNames.indexOf(name), 0) + (groupNames.includes(name) ? 0 : groups.findIndex(g => g.name === name) + groupNames.length))
           return (
             <button key={name} onClick={() => setGroup(name)} style={{
-              display: 'inline-flex', alignItems: 'center', padding: '6px 11px', borderRadius: 18, fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
-              border: `1px solid ${active ? (name === 'ALL' ? T.accent : color) : T.border}`,
-              borderBottom: name === 'ALL' ? undefined : `3px solid ${color}`,
+              display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 8px 7px 14px', borderRadius: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
               background: active ? T.accent : T.surface2, color: active ? '#fff' : T.text,
             }}>
-              {name !== 'ALL' && <CardChip color={color} name={name} size={18} />}
-              {name === 'ALL' ? 'All' : name} <span style={{ opacity: 0.6, fontWeight: 500, marginLeft: 6 }}>{n}</span>
+              {name !== 'ALL' && <i style={{ width: 9, height: 9, borderRadius: '50%', background: active ? '#fff' : color }} />}
+              {name === 'ALL' ? 'All' : name}
+              <span style={{ minWidth: 22, textAlign: 'center', padding: '1px 7px', borderRadius: 7, fontSize: 11.5, fontWeight: 600, background: active ? 'rgba(255,255,255,.22)' : T.border, color: active ? '#fff' : T.muted }}>{n}</span>
             </button>
           )
         })}
         <div style={{ flex: 1 }} />
         <input style={{ ...input, width: 170 }} placeholder="Search name, ticker, tag…" value={search} onChange={e => setSearch(e.target.value)} />
-        {error && <span style={{ color: T.negative, fontSize: 12 }}>{error}</span>}
         {group === 'ALL' && !q && <button style={btn()} onClick={() => setOpen(allOpen ? new Set() : new Set(groups.map(g => g.name)))}>{allOpen ? 'Collapse all' : 'Expand all'}</button>}
-        <a href={portfolioCsvUrl} style={{ ...btn(), textDecoration: 'none' }}>↓ CSV</a>
-        <button style={btn(true)} onClick={() => setEditing('new')}>+ Add</button>
       </div>
 
       <div style={{ ...card, overflowX: 'auto' }}>
@@ -176,7 +195,7 @@ export default function Holdings() {
                     </thead>
           {visibleGroups.map(g => {
             const expanded = isOpen(g.name)
-            const ctx = { group: g.name, total: totals.present }
+            const ctx = { group: g.name, total: totals.present, color: paletteAt(Math.max(groupNames.indexOf(g.name), 0) + (groupNames.includes(g.name) ? 0 : groups.findIndex(x => x.name === g.name) + groupNames.length)) }
             return (
               <tbody key={g.name}>
                 <tr onClick={() => toggle(g.name)} style={{ cursor: 'pointer', background: T.surface2 }}>
@@ -196,6 +215,13 @@ export default function Holdings() {
           {visibleGroups.length === 0 && <tbody><tr><td colSpan={cols.length} style={{ ...td, textAlign: 'center', color: T.muted }}>No holdings found</td></tr></tbody>}
         </table>
       </div>
+      </div>
+
+      <aside style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
+        <HoldingsSide holdings={holdings} total={totals.present} notes={notes} />
+      </aside>
+      </div>
+      )}
 
       {editing && (
         <HoldingDialog holding={editing === 'new' ? null : editing} groups={groupNames} allTags={allTags}

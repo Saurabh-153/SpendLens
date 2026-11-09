@@ -1,21 +1,15 @@
-"""Transaction ledger: buys, sells, dividends and opening balances with dates.
+"""Dated money flows per holding (the `transactions` table), for the Holdings KPI's XIRR.
 
-The holdings table stays the current position. A ledger row can also update it ("apply"), or be a pure record
-of something that already happened. Deleting a row never touches the holding.
-
-kinds: BUY (cash out), SELL (cash in), DIVIDEND (cash in), OPENING (money already in the holding, with the date it went in).
-Realised gain is measured against the holding's average cost (no lot tracking), which is exact for averaged SIP-style buying.
+SIPs write their instalments here (sip.py); older manually entered BUY / SELL / DIVIDEND / OPENING rows are kept.
+The manual-entry Ledger screen was replaced by the stock ledger (equity.py), which works from broker tradebooks.
 """
 from datetime import date
 
 from accrual import _deposits, _iso
 from db.base import row_dict
-from db.models import Holding
 from db.models.portfolio import LedgerTransaction
 from portfolio import xirr
 
-KINDS = ("BUY", "SELL", "DIVIDEND", "OPENING")
-DIRECT = ("MF", "FD", "PF")
 
 
 def rows(session):
@@ -27,69 +21,6 @@ def fy_of(d):
     """Indian financial year label for an ISO date: 2026-04-01 .. 2027-03-31 -> FY2026-27."""
     y = int(d[:4]) + (1 if int(d[5:7]) >= 4 else 0)
     return f"FY{y - 1}-{str(y)[2:]}"
-
-
-def add(session, d, h=None):
-    """Insert a transaction; `h` is the holding as a dict (or None). Returns the new id. Raises ValueError for bad input."""
-    kind = d["kind"].upper()
-    if kind not in KINDS:
-        raise ValueError("Unknown transaction type")
-    if _iso(d["tx_date"]) is None:
-        raise ValueError("Enter a valid date")
-    if kind != "DIVIDEND" and not h:
-        raise ValueError("Pick a holding")
-    qty, price, fees, amount = float(d.get("qty") or 0), float(d.get("price") or 0), float(d.get("fees") or 0), float(d.get("amount") or 0)
-    priced = bool(h) and h["asset_type"] not in DIRECT
-    realized, applied = 0.0, 0
-
-    if kind in ("BUY", "SELL") and priced:
-        if qty <= 0 or price <= 0:
-            raise ValueError("Enter quantity and price")
-        amount = qty * price + fees if kind == "BUY" else qty * price - fees
-    elif kind == "DIVIDEND" and amount <= 0:
-        amount = qty * price
-    if amount <= 0 and kind != "OPENING":
-        raise ValueError("Enter an amount")
-    if kind == "OPENING" and amount <= 0:
-        amount = h["qty"] * h["buy_price"]
-
-    if kind == "SELL":
-        if priced:
-            realized = amount - qty * h["buy_price"]
-        elif h:
-            value = h["qty"] * h["cmp"]
-            frac = min(amount / value, 1) if value else 0
-            realized = amount - h["qty"] * h["buy_price"] * frac
-    if d.get("apply") and kind in ("BUY", "SELL") and h:
-        applied = 1
-        row = session.get(Holding, h["id"])
-        if priced:
-            if kind == "BUY":
-                nq = h["qty"] + qty
-                row.qty, row.buy_price = nq, (h["qty"] * h["buy_price"] + amount) / nq
-                row.cmp = h["cmp"] if (h["cmp"] or 0) > 0 else price
-            else:
-                if qty > h["qty"] + 1e-9:
-                    raise ValueError(f"You only hold {h['qty']:g}")
-                row.qty = h["qty"] - qty
-        else:
-            value = h["qty"] * h["cmp"]
-            if kind == "BUY":
-                units = h["units"] + amount / h["nav"] if (h["units"] or 0) > 0 and (h["nav"] or 0) > 0 else h["units"]
-                row.qty, row.buy_price = 1, h["qty"] * h["buy_price"] + amount
-                row.cmp, row.units = (units * h["nav"]) if units and h["nav"] else value + amount, units or 0
-            else:
-                if amount > value + 0.5:
-                    raise ValueError("Withdrawal is more than the holding is worth")
-                frac = amount / value if value else 0
-                row.qty, row.buy_price = 1, h["qty"] * h["buy_price"] * (1 - frac)
-                row.cmp, row.units = value * (1 - frac), (h["units"] or 0) * (1 - frac)
-    t = LedgerTransaction(holding_id=h["id"] if h else None, name=(h["name"] if h else d.get("name", "")).strip(), tx_date=d["tx_date"],
-                          kind=kind, qty=qty, price=price, amount=round(amount, 2), fees=fees, realized=round(realized, 2),
-                          note=d.get("note", ""), source=d.get("source", "manual"), applied=applied)
-    session.add(t)
-    session.commit()
-    return t.id
 
 
 def _virtual_flows(h, today):

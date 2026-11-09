@@ -49,8 +49,9 @@ def test_user_id_added_to_owned_tables(unmigrated_db):
     database.run_migrations(conn)
     for t in ("categories", "holdings", "transactions", "portfolio_goals"):
         assert "user_id" in database._columns(conn, t), f"{t} has no user_id"
-        rows = conn.execute(f"SELECT COUNT(*) FROM {t} WHERE user_id IS NOT 1").fetchone()[0]
-        assert rows == 0, f"{t} has rows not owned by user 1"
+        # the real file may hold other users by now; the migration's job is that no row is left without an owner
+        rows = conn.execute(f"SELECT COUNT(*) FROM {t} WHERE user_id IS NULL").fetchone()[0]
+        assert rows == 0, f"{t} has rows with no owner"
 
 
 def test_migration_takes_a_backup_of_a_database_with_data(unmigrated_db):

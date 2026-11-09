@@ -31,6 +31,26 @@ from .trackers import (  # noqa: F401
     TrackerCostLink,
     TrackerDay,
 )
+from .equity import (  # noqa: F401
+    BrokerHolding,
+    EquityAudit,
+    EquityDividend,
+    EquityEvent,
+    EquitySecurity,
+    EquityTrade,
+)
+from .mf import (  # noqa: F401
+    MfFundMonth,
+    MfHolding,
+    MfReport,
+    MfSource,
+)
+from .access import (  # noqa: F401
+    User,
+    AuthSession,
+    ModuleGrant,
+    AccessRequest,
+)
 from .cards import (  # noqa: F401
     CardAccount,
     Card,
@@ -39,3 +59,5 @@ from .cards import (  # noqa: F401
     CardMerchantRule,
     CardPerk,
 )
+
+from .. import scope  # noqa: F401,E402  (registers the per-user session filter; see db/scope.py)

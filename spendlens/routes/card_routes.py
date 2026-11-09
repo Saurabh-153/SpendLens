@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from ._common import row_dict
-from db.engine import SessionLocal, get_session
+from db.engine import get_session
 from db.models import Card, CardMerchantRule
 
 router = APIRouter(prefix="/spendlens/api", tags=["cards"])
@@ -76,7 +76,8 @@ MAX_UPLOAD = 15 * 1024 * 1024  # a statement is under 1 MB; this is a safety sto
 
 @router.post("/cards/upload")
 async def cards_upload(files: list[UploadFile] = File(...), password: str = Form(""),
-                       use_llm: bool = Form(False), card_id: int | None = Form(None)):
+                       use_llm: bool = Form(False), card_id: int | None = Form(None),
+                       session=Depends(get_session)):
     """Import uploaded statement PDFs. A file is checked (against its own purchases total where
     the statement prints one, otherwise that every line was read), so a bad parse is reported
     and skipped rather than half-imported. The PDF and its password are used for this request
@@ -89,10 +90,9 @@ async def cards_upload(files: list[UploadFile] = File(...), password: str = Form
         if len(data) > MAX_UPLOAD:
             raise HTTPException(status_code=400, detail=f"{f.filename} is too large to be a statement")
         loaded.append((f.filename or "statement.pdf", io.BytesIO(data)))
-    with SessionLocal() as session:
-        # Each statement names its own card (and creates it the first time), so files from
-        # different cards can be uploaded together. `card_id` is only an explicit override.
-        return {"files": cards.import_files(session, card_id, loaded, password, use_llm)}
+    # Each statement names its own card (and creates it the first time), so files from
+    # different cards can be uploaded together. `card_id` is only an explicit override.
+    return {"files": cards.import_files(session, card_id, loaded, password, use_llm)}
 
 
 @router.post("/cards/merchant-rule")
@@ -186,36 +186,42 @@ class PerkIn(BaseModel):
     checked: bool | None = None
 
 
-def _perk_call(fn, *args):
+def _own_card(session, cid):
+    """The card id, or a 404 if it is not one of the signed-in user's cards."""
+    if not cards.get_card(session, cid):
+        raise HTTPException(status_code=404, detail="Not found")
+    return cid
+
+
+def _perk_call(session, fn, *args):
     import card_perks
-    with SessionLocal() as session:
-        try:
-            return getattr(card_perks, fn)(session, *args)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Not found")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    try:
+        return getattr(card_perks, fn)(session, *args)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/cards/{cid}/perks")
-def card_perks_list(cid: int):
+def card_perks_list(cid: int, session=Depends(get_session)):
     """A card's benefits, as written down (seeded from its scheme's published terms, marked to check)."""
-    return _perk_call("list_perks", cid)
+    return _perk_call(session, "list_perks", _own_card(session, cid))
 
 
 @router.post("/cards/{cid}/perks")
-def card_perks_add(cid: int, data: PerkIn):
-    return _perk_call("add_perk", cid, data.model_dump(exclude_none=True))
+def card_perks_add(cid: int, data: PerkIn, session=Depends(get_session)):
+    return _perk_call(session, "add_perk", _own_card(session, cid), data.model_dump(exclude_none=True))
 
 
 @router.patch("/cards/perks/{pid}")
-def card_perks_update(pid: int, data: PerkIn):
-    return _perk_call("update_perk", pid, data.model_dump(exclude_none=True))
+def card_perks_update(pid: int, data: PerkIn, session=Depends(get_session)):
+    return _perk_call(session, "update_perk", pid, data.model_dump(exclude_none=True))
 
 
 @router.delete("/cards/perks/{pid}")
-def card_perks_delete(pid: int):
-    return _perk_call("delete_perk", pid)
+def card_perks_delete(pid: int, session=Depends(get_session)):
+    return _perk_call(session, "delete_perk", pid)
 
 
 @router.get("/cards/advice")

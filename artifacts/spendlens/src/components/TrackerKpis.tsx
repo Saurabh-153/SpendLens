@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { CalendarTracker } from '../api'
 import { T, fmtFull } from '../theme'
 import { card } from './ui'
@@ -11,14 +12,47 @@ const STATUS = {
 const facts = { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px', fontSize: 12, color: T.muted } as const
 const num = { color: T.text, fontWeight: 600, fontVariantNumeric: 'tabular-nums' } as const
 
-/** One card per tracker above the calendar, plus a 'what a day costs' card for every tracker linked to spending. */
+const COMPACT_KEY = 'spendlens.trackerKpisCompact'
+
+/** One card per tracker above the calendar, plus a 'what a day costs' card for every tracker linked to spending.
+ *  "Show less" folds them into one line per tracker, as the Sheet does with its KPIs; the choice is remembered. */
 export default function TrackerKpis({ trackers }: { trackers: CalendarTracker[] }) {
+  const [compact, setCompact] = useState(() => { try { return localStorage.getItem(COMPACT_KEY) === '1' } catch { return false } })
+  const flip = () => setCompact(c => { try { localStorage.setItem(COMPACT_KEY, c ? '0' : '1') } catch { /* storage unavailable */ } return !c })
   if (!trackers.length) return null
   return (
-    <div aria-label="Tracker KPIs" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 12, marginBottom: 14 }}>
-      {trackers.map(t => <TrackerCard key={t.id} t={t} />)}
-      {trackers.filter(t => t.kpi.cost).map(t => <CostCard key={`cost-${t.id}`} t={t} />)}
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+        <span style={{ fontSize: 11, letterSpacing: 0.6, textTransform: 'uppercase', color: T.muted, fontWeight: 600 }}>Trackers this month</span>
+        <button type="button" onClick={flip} style={{ border: 'none', background: 'none', cursor: 'pointer', color: T.accent, fontSize: 12.5, fontWeight: 600, padding: '2px 4px' }}>
+          {compact ? 'Show all' : 'Show less'}
+        </button>
+      </div>
+      {compact ? (
+        <section aria-label="Tracker KPIs" style={{ ...card, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: '8px 22px', flexWrap: 'wrap', fontSize: 13 }}>
+          {trackers.map(t => <TrackerLine key={t.id} t={t} />)}
+        </section>
+      ) : (
+        <div aria-label="Tracker KPIs" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: 12 }}>
+          {trackers.map(t => <TrackerCard key={t.id} t={t} />)}
+          {trackers.filter(t => t.kpi.cost).map(t => <CostCard key={`cost-${t.id}`} t={t} />)}
+        </div>
+      )}
     </div>
+  )
+}
+
+/** A tracker in one line: done of goal, this week, its status and (when linked to spending) what a day costs. */
+function TrackerLine({ t }: { t: CalendarTracker }) {
+  const k = t.kpi, s = STATUS[k.status], c = k.cost
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <i style={{ width: 10, height: 10, borderRadius: 3, background: t.color }} />
+      <b style={{ fontWeight: 600 }}>{t.name}</b>
+      <span style={{ color: T.muted }}><b style={num}>{k.count}</b> of {k.month_goal} · week <b style={num}>{k.this_week.done}/{k.this_week.goal}</b></span>
+      <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 999, color: s.colour, background: `${s.colour}22` }}>{s.text}</span>
+      {c && <span style={{ color: T.muted }}>a day costs <b style={{ ...num, color: c.diff > 0 ? T.warn : T.positive }}>{c.diff >= 0 ? '+' : '−'}{fmtFull(Math.abs(c.diff))}</b></span>}
+    </span>
   )
 }
 

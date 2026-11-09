@@ -55,6 +55,8 @@ def normalise(value):
     """A value as both backends should agree on it, for the checksum."""
     if isinstance(value, bool):
         return int(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):  # a blob: bytea may come back as a memoryview
+        return hashlib.sha256(bytes(value)).hexdigest()
     if isinstance(value, float):  # SQLite may hand back 2 where PostgreSQL's double gives 2.0
         value = round(value, 9) + 0.0
         return int(value) if value.is_integer() else value
@@ -70,14 +72,45 @@ def table_digest(conn, table, cols):
     return len(rows), h.hexdigest()
 
 
+def row_index(rows, cols, pk_cols):
+    """{row id: row checksum} for a table's rows, the id being its primary key (or the row itself without one).
+    Two of these, from consecutive copies, give exactly which rows were added, changed or removed."""
+    pos = [cols.index(c) for c in pk_cols] if pk_cols else None
+    out = {}
+    for r in rows:
+        norm = tuple(normalise(v) for v in r)
+        digest = hashlib.sha1(repr(norm).encode()).hexdigest()[:16]
+        out[repr(tuple(norm[i] for i in pos)) if pos else digest] = digest
+    return out
+
+
+def diff_snapshots(old, new):
+    """{table: (added, changed, removed)} between two snapshots from copy_all(snapshot=...); tables with no change
+    are left out. With no previous snapshot every row counts as added."""
+    out = {}
+    for name, rows in new.items():
+        before = (old or {}).get(name, {})
+        added = sum(1 for k in rows if k not in before)
+        changed = sum(1 for k, h in rows.items() if k in before and before[k] != h)
+        removed = sum(1 for k in before if k not in rows)
+        if added or changed or removed:
+            out[name] = (added, changed, removed)
+    for name in set(old or {}) - set(new):
+        if old[name]:
+            out[name] = (0, 0, len(old[name]))
+    return out
+
+
 def _reflect(engine):
     meta = MetaData()
     meta.reflect(bind=engine)
     return meta
 
 
-def copy_all(src, tgt, log=None):
+def copy_all(src, tgt, log=None, snapshot=None):
     """Replace every table in `tgt` with the rows of `src`, then verify.
+
+    `snapshot`, if given, is filled with {table: row_index(...)} of what was copied (see diff_snapshots).
 
     Returns (tables, mismatches): the table names copied, in order, and [(name, source_rows, target_rows)] for
     every table whose checksum differs after the copy (empty when the copy is exact). `log(name, rows)` is called
@@ -115,6 +148,8 @@ def copy_all(src, tgt, log=None):
                 for i in range(0, len(batch), 1000):
                     t.execute(table.insert(), batch[i:i + 1000])
                 source_digests[table.name] = table_digest(src_conn, stable, cols)
+                if snapshot is not None:
+                    snapshot[table.name] = row_index(rows, cols, [c.name for c in stable.primary_key.columns])
                 if log:
                     log(table.name, len(batch))
             if tgt.dialect.name == "postgresql":  # identity/serial counters must continue after the copied ids

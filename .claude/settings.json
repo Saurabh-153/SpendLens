@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest *)",
+      "Bash(./venv_expense/Scripts/python -m pytest *)",
+      "Bash(./venv_expense/Scripts/python.exe -m pytest *)",
+      "PowerShell(python -m pytest *)",
+      "PowerShell(.\\venv_expense\\Scripts\\python -m pytest *)",
+      "Bash(python -m ruff *)",
+      "Bash(./venv_expense/Scripts/python -m ruff *)",
+      "PowerShell(.\\venv_expense\\Scripts\\python -m ruff *)",
+      "Bash(python -m alembic revision *)",
+      "Bash(python -m alembic history*)",
+      "Bash(python -m alembic heads*)",
+      "PowerShell(.\\venv_expense\\Scripts\\python -m alembic revision *)",
+      "PowerShell(.\\venv_expense\\Scripts\\python -m alembic history*)",
+      "PowerShell(.\\venv_expense\\Scripts\\python -m alembic heads*)",
+      "Bash(pnpm run typecheck*)",
+      "Bash(pnpm run build*)",
+      "Bash(pnpm run test*)",
+      "Bash(pnpm run check*)",
+      "Bash(pnpm typecheck*)",
+      "Bash(pnpm build*)",
+      "PowerShell(pnpm run typecheck*)",
+      "PowerShell(pnpm run build*)",
+      "PowerShell(pnpm run test*)",
+      "PowerShell(pnpm run check*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch --show-current)",
+      "PowerShell(git status*)",
+      "PowerShell(git diff*)",
+      "PowerShell(git log*)",
+      "PowerShell(git show*)"
+    ],
+    "deny": [
+      "Read(**/.env.local)",
+      "Edit(**/.env.local)",
+      "Read(**/spendlens/*.db)",
+      "Edit(**/spendlens/*.db*)",
+      "Edit(**/spendlens/*.bak)",
+      "Edit(**/spendlens/database-mode.json)",
+      "Edit(**/spendlens/*.mirror.json)",
+      "Edit(**/spendlens/*.sync.json)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "PowerShell(git push --force *)",
+      "PowerShell(git push -f *)"
+    ]
+  },
+  "worktree": {
+    "baseRef": "head"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/worktree_setup.py\"",
+            "timeout": 320,
+            "statusMessage": "Worktree setup"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/worktree_setup.py\"",
+            "timeout": 320,
+            "statusMessage": "Worktree setup"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/after_edit.py\"",
+            "timeout": 60,
+            "statusMessage": "ruff"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/stop_check.py\"",
+            "timeout": 600,
+            "statusMessage": "Typecheck and nearest tests"
+          }
+        ]
+      }
+    ]
+  }
+}

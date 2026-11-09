@@ -45,7 +45,30 @@ sys.path.insert(0, str(BACKEND))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 ON_POSTGRES = bool(PG_URL)
+_EXPECTED_DB_ENV = {k: os.environ.get(k) for k in ("DATABASE_URL", "SPENDLENS_MIRROR")}
+
+
+@pytest.fixture(autouse=True)
+def _database_env_untouched():
+    """Fail (and undo it) if a test changes DATABASE_URL / SPENDLENS_MIRROR, e.g. by importing a module that loads
+    .env.local: subprocesses started later (Alembic in the migration tests) would otherwise reach the real database."""
+    yield
+    changed = {k for k, v in _EXPECTED_DB_ENV.items() if os.environ.get(k) != v}
+    for k in changed:
+        if _EXPECTED_DB_ENV[k] is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = _EXPECTED_DB_ENV[k]
+    assert not changed, f"a test changed {sorted(changed)}; it must never point the suite at a real database"
 sqlite_only = pytest.mark.skipif(ON_POSTGRES, reason="about the SQLite file itself")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_throttles():
+    """Every TestClient comes from the same address, so failed sign-ins in one test must not lock out the next."""
+    yield
+    import security
+    security.reset_throttles()
 
 
 #: A small, deterministic portfolio: one of each shape the valuation code handles, with
@@ -57,6 +80,10 @@ FIXTURE_HOLDINGS = [
     ("Fixture Gold ETF", "GOLDBEES", "GOLD", "Gold", "Gold", 1000, 70, 100, 0, 0, 5000),
     ("Fixture Bank FD", "", "FD", "Debt", "Fixed Deposits", 1, 250000, 300000, 0, 0, 0),
 ]
+
+
+ADMIN_EMAIL, ADMIN_PASSWORD = "admin@test.local", "admin-test-pw"
+ADMIN_TOKEN = "test-admin-session-token"  # cookie value of a ready-made admin session; see seeded_db
 
 
 def _reset_postgres(engine):
@@ -83,6 +110,15 @@ def seeded_db():
         if c.execute(text("SELECT COUNT(*) FROM holdings")).scalar() == 0:
             c.execute(text(f"INSERT INTO holdings ({', '.join(cols)}, manual) VALUES ({', '.join(':' + k for k in cols)}, 1)"),
                       [dict(zip(cols, h)) for h in FIXTURE_HOLDINGS])
+    import auth
+    os.environ["SPENDLENS_ADMIN_EMAIL"], os.environ["SPENDLENS_ADMIN_PASSWORD"] = ADMIN_EMAIL, ADMIN_PASSWORD
+    auth.bootstrap_admin()
+    from db.engine import SessionLocal
+    from db.models import AuthSession
+    with SessionLocal() as db:  # a standing admin login, so tests that build their own app (mirror/failover) can sign in without a POST
+        if not db.get(AuthSession, auth._token_hash(ADMIN_TOKEN)):
+            db.add(AuthSession(token_hash=auth._token_hash(ADMIN_TOKEN), user_id=1, expires_at="2999-01-01 00:00:00"))
+            db.commit()
     return PG_URL if ON_POSTGRES else Path(engine.url.database)
 
 
@@ -95,7 +131,35 @@ def client(seeded_db):
 
     app = FastAPI()
     app.include_router(router)
-    return TestClient(app)
+    c = TestClient(app)
+    r = c.post("/spendlens/api/auth/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD})
+    assert r.status_code == 200, r.text  # every existing test runs as the admin, who has all modules
+    return c
+
+
+@pytest.fixture(scope="session")
+def make_user(client):
+    """make_user(modules=[...], role="user") -> (TestClient signed in as a new user, user dict). The admin creates it."""
+    import itertools
+    from fastapi.testclient import TestClient
+    counter = itertools.count(1)
+
+    def make(modules=(), role="user"):
+        email = f"zz-user-{next(counter)}-{os.urandom(3).hex()}@test.local"
+        r = client.post("/spendlens/api/admin/users", json={"email": email, "password": "user-test-pw", "role": role, "modules": list(modules)})
+        assert r.status_code == 201, r.text
+        c = TestClient(client.app)
+        login = c.post("/spendlens/api/auth/login", json={"email": email, "password": "user-test-pw"})
+        assert login.status_code == 200, login.text
+        return c, r.json()
+
+    return make
+
+
+@pytest.fixture
+def anon_client(client):
+    from fastapi.testclient import TestClient
+    return TestClient(client.app)
 
 
 @pytest.fixture

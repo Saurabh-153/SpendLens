@@ -90,7 +90,7 @@ def _seed(db, card_id):
                card_id=card_id, kind=p["kind"], title=p["title"], detail=p["detail"], value_yr=p["value_yr"],
                source=p["source"], sort=n)
     for i in fam:
-        C.query(db, "UPDATE cards SET perks_seeded=1 WHERE id=:id", id=i)
+        C.query(db, "UPDATE cards SET perks_seeded=1 WHERE id=:id AND user_id=:uid", id=i)
     db.commit()
 
 
@@ -148,7 +148,7 @@ def add_perk(db, card_id, data):
 
 
 def update_perk(db, perk_id, data):
-    row = C.query(db, "SELECT * FROM card_perks WHERE id=:id", id=perk_id).mappings().first()
+    row = C.query(db, "SELECT * FROM card_perks WHERE id=:id AND card_id IN (SELECT id FROM cards WHERE user_id=:uid)", id=perk_id).mappings().first()
     if not row:
         raise KeyError("perk")
     f = _clean(data, partial=True)
@@ -157,16 +157,16 @@ def update_perk(db, perk_id, data):
         if "checked" not in f and any(k in f for k in ("title", "detail", "value_yr", "kind")):
             f["checked"] = 1                      # you wrote it yourself, so it is yours
         # `f`'s keys come from _clean's fixed set of column names, never from the request.
-        C.query(db, "UPDATE card_perks SET " + ", ".join(f"{k}=:{k}" for k in f) + ", updated=:updated WHERE id=:id",
+        C.query(db, "UPDATE card_perks SET " + ", ".join(f"{k}=:{k}" for k in f) + ", updated=:updated WHERE id=:id AND card_id IN (SELECT id FROM cards WHERE user_id=:uid)",
                **f, updated=date.today().isoformat(), id=perk_id)
         db.commit()
     return list_perks(db, row["card_id"])
 
 
 def delete_perk(db, perk_id):
-    card_id = C.query(db, "SELECT card_id FROM card_perks WHERE id=:id", id=perk_id).scalar()
+    card_id = C.query(db, "SELECT card_id FROM card_perks WHERE id=:id AND card_id IN (SELECT id FROM cards WHERE user_id=:uid)", id=perk_id).scalar()
     if card_id is None:
         raise KeyError("perk")
-    C.query(db, "DELETE FROM card_perks WHERE id=:id", id=perk_id)
+    C.query(db, "DELETE FROM card_perks WHERE id=:id AND card_id IN (SELECT id FROM cards WHERE user_id=:uid)", id=perk_id)
     db.commit()
     return list_perks(db, card_id)

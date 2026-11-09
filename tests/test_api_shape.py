@@ -25,10 +25,12 @@ READ_ENDPOINTS = [
     ("/portfolio/plan", None),
     ("/portfolio/exposure", {"exposures", "total", "by_group", "tags"}),
     ("/portfolio/mix", {"targets", "returns", "current", "sip", "plan", "path", "forecast"}),
-    ("/portfolio/kpis", None),
+    ("/portfolio/kpis", {"history", "forecast", "extra_sip_needed", "commitments", "concentration", "fixed", "liquidity"}),
     ("/prices/status", None),
-    ("/transactions", None),
-    ("/ledger/summary", None),
+    ("/equity/summary", {"accounts", "kpis", "stocks", "dividends", "coverage", "issue_counts"}),
+    ("/equity/audit", {"issues", "log", "holdings_checks"}),
+    ("/equity/events", {"events", "kinds"}),
+    ("/mf/analysis", {"has_data", "funds", "anomalies", "overlap", "coverage", "unmatched_holdings", "latest_month", "sources"}),
 ]
 
 
@@ -40,6 +42,25 @@ def test_read_endpoint_responds(client, path, keys):
     if keys is not None:
         assert isinstance(body, dict), f"{path} should return an object"
         assert keys <= set(body), f"{path} is missing {keys - set(body)}"
+
+
+def test_kpi_sip_is_split_into_equity_fixed_income_and_gold(make_user):
+    """The tile's three rows must add up to the total, and PF, FD, liquid and emergency money must not count as equity."""
+    a, _ = make_user(modules=["holdings"])
+    for name, kind, grp, amt in [
+        ("ZZ Flexi Cap Fund", "MF", "Mutual Funds", 1000),
+        ("ZZ Infosys", "EQ", "Equity", 2000),
+        ("ZZ Gold ETF", "GOLD", "Gold", 4000),
+        ("ZZ EPF", "PF", "Provident Fund", 8000),
+        ("ZZ Bank FD", "FD", "Fixed Return", 16000),
+        ("ZZ Liquid Fund", "MF", "Mutual Funds", 32000),
+        ("ZZ Conservative Hybrid", "MF", "Emergency Fund", 64000),  # the name alone would guess Equity
+    ]:
+        r = a.post(f"{API}/holdings", json={"name": name, "asset_type": kind, "grp": grp, "qty": 1, "buy_price": 100, "cmp": 100, "sip_amount": amt})
+        assert r.status_code == 201, r.text
+    sip = a.get(f"{API}/portfolio/kpis").json()["sip"]
+    assert sip["by_mix"] == {"Equity": 3000, "Gold": 4000, "Debt": 120000}
+    assert sum(sip["by_mix"].values()) == sip["monthly"]
 
 
 def test_mix_targets_sum_to_100(client):
@@ -79,6 +100,14 @@ def test_unknown_month_is_not_an_error(client):
     """The UI lets you page to any month; an empty one must come back empty, not 500."""
     r = client.get(f"{API}/expenses/monthly-grid?month=1999-01")
     assert r.status_code == 200
+
+
+def test_dashboard_categories_carry_six_months_of_history(client):
+    """The category cards on the Expense page draw a six-month sparkline; the last point is this month's spend."""
+    d = client.get(f"{API}/dashboard?month={MONTH}").json()
+    for c in d["categories"]:
+        assert len(c["history"]) == 6
+        assert c["history"][-1] == c["spent"]
 
 
 def test_cashback_is_not_counted_as_spend(client):

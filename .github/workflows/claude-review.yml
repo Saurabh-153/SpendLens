@@ -1,0 +1,74 @@
+name: Claude review
+
+# An automatic review of each PR that touches code, aimed at the two bug classes that cost most here: one user
+# reaching another user's data, and migrations that break on one of the two databases. Read-only: it comments,
+# it never pushes, approves or requests changes. CI (ci.yml) stays the gate.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    paths:
+      - 'spendlens/**'
+      - 'alembic/**'
+      - 'artifacts/spendlens/src/**'
+      - 'tests/**'
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Drafts wait; PRs from forks get no secrets, so skip them.
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5   # the repo's .claude hooks run on `python` (standard library only)
+        with:
+          python-version: '3.12'
+
+      - uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe  # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this SpendLens pull request. Read CLAUDE.md first. The diff is
+            `git diff origin/${{ github.base_ref }}...HEAD`; read changed functions in full, not just hunks.
+
+            In this order:
+            1. Multi-user isolation and module access: apply every check in .claude/agents/isolation-reviewer.md
+               (raw SQL without user_id, child tables reached without a parent ownership check, foreign ids from
+               request bodies, URL prefixes missing from auth.MODULE_OF_PATH, user-owned tables without
+               tests/test_isolation.py cases).
+            2. Migrations, if alembic/versions/ or spendlens/db/models/ changed: the rules in
+               .claude/agents/migration-author.md (runs on SQLite and PostgreSQL, db/ddl.py helpers, a real
+               downgrade(), guards for work the baseline already did, no edits to an already-merged revision,
+               a single Alembic head).
+            3. Backend/frontend contract: response keys that changed without src/api.ts and
+               tests/test_api_shape.py changing with them.
+            4. Other correctness bugs in the changed code.
+
+            Skip style and formatting: CI runs ruff, typecheck, build and the tests on both databases.
+
+            Post each finding as an inline comment on its line
+            (mcp__github_inline_comment__create_inline_comment): what goes wrong, a concrete scenario
+            (for isolation: user A / user B), and the fix. Then post one summary with `gh pr comment`:
+            findings by severity, or "No isolation, migration or contract findings" followed by the
+            checks you ran. Don't approve or request changes.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 30
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Read,Grep,Glob"

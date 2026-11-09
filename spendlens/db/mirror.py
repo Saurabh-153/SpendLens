@@ -40,6 +40,11 @@ class Mirror:
         self.paused = lambda: False      # set by failover: no refresh while PostgreSQL is down
         self.before_replace = lambda: None  # set by failover: close its read-only handles on the mirror
         self.runs = 0
+        self.log = None                  # db.synclog.SyncLog, set by failover: every run is recorded there
+        self.direction = "postgresql→sqlite"
+        self.pending = 0                 # saves since the last good copy started
+        self.last_totals = {}            # {table: rows} of the last good copy
+        self._reason = None
 
     # ---- state -------------------------------------------------------------------------------------------
     def _read_meta(self):
@@ -65,9 +70,13 @@ class Mirror:
         return os.path.isfile(self.path) and os.path.getsize(self.path) > 0
 
     # ---- scheduling --------------------------------------------------------------------------------------
-    def mark_dirty(self, *_):
+    def mark_dirty(self, reason="save"):
         with self._lock:
             self._dirty_at = time.monotonic()
+            if reason == "save":
+                self.pending += 1
+            if self._reason in (None, "save", "retry"):
+                self._reason = reason
         self._wake.set()
 
     def start(self):
@@ -91,10 +100,13 @@ class Mirror:
             if self._stop.is_set():
                 break
             with self._lock:
-                self._dirty_at = None
+                trigger = (self._reason or "save") if self._dirty_at is not None else "periodic"
+                if trigger == "retry":
+                    trigger = "save"
+                self._dirty_at, self._reason = None, None
             last_periodic = time.monotonic()
             if not self.paused():
-                self.run()
+                self.run(trigger=trigger)
 
     def stop(self, final=True):
         self._stop.set()
@@ -102,7 +114,7 @@ class Mirror:
         if self._thread:
             self._thread.join(timeout=5)
         if final and not self.paused():
-            self.run()
+            self.run(trigger="shutdown")
         if self._template and os.path.exists(self._template):
             try:
                 os.remove(self._template)
@@ -161,32 +173,63 @@ class Mirror:
                     raise RuntimeError(f"{os.path.basename(self.path)} is locked by another program")
                 time.sleep(0.3)
 
-    def run(self):
-        """Refresh the mirror now. Returns True on success. Never raises: a failure is logged and recorded."""
-        if not self._run_lock.acquire(blocking=False):
-            self.mark_dirty()  # one is already running; go again after it
+    def _record(self, ok, error=None):
+        if ok:
+            self.runs += 1
+            self._write_meta(updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=None)
+        else:
+            try:
+                self._write_meta(last_error=str(error)[:300])
+            except OSError:
+                pass
+
+    def _log(self, trigger, ok, started, snap=None, error=None):
+        """Record the run in the sync log (never lets logging break a sync)."""
+        if ok:
+            self.last_totals = {t: len(v) for t, v in (snap or {}).items()}
+        if self.log is None:
+            return
+        try:
+            duration = (time.monotonic() - started) * 1000
+            if ok:
+                # one "last copied state" for both directions: each copy is the main database's whole content, so
+                # the difference from the previous copy (whichever way it ran) is exactly what changed
+                prev = self.log.last_snapshot("latest")
+                changes = None if prev is None else replicate.diff_snapshots(prev, snap)
+                self.log.record_run(self.direction, trigger, True, duration, totals=self.last_totals, changes=changes)
+                self.log.save_snapshot("latest", snap)
+            else:
+                self.log.record_run(self.direction, trigger, False, duration, error=str(error).splitlines()[0][:300])
+        except Exception as e:
+            log.warning("could not record the sync in the log: %s", e)
+
+    def run(self, wait=False, trigger="manual"):
+        """Refresh the mirror now. Returns True on success. Never raises: a failure is logged and recorded.
+        A refresh already running makes this one a no-op (it schedules another), unless `wait` is set."""
+        if not self._run_lock.acquire(blocking=wait):
+            self.mark_dirty("retry")  # one is already running; go again after it
             return False
         fresh = f"{self.path}.tmp-{os.getpid()}"
+        started, pending, snap = time.monotonic(), self.pending, {}
         try:
             shutil.copyfile(self._template_file(), fresh)
             tgt = self._sqlite_engine(fresh)
             try:
-                _, mismatches = replicate.copy_all(self.primary, tgt)
+                _, mismatches = replicate.copy_all(self.primary, tgt, snapshot=snap)
             finally:
                 tgt.dispose()
             if mismatches:
                 raise RuntimeError("copy did not verify: " + ", ".join(m[0] for m in mismatches))
             self._backup_once()
             self._replace(fresh)
-            self.runs += 1
-            self._write_meta(updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), last_error=None)
+            self._record(True)
+            self.pending = max(0, self.pending - pending)
+            self._log(trigger, True, started, snap)
             return True
         except Exception as e:  # keep the old mirror; the next trigger tries again
             log.warning("SQLite mirror refresh failed: %s", e)
-            try:
-                self._write_meta(last_error=str(e)[:300])
-            except OSError:
-                pass
+            self._record(False, e)
+            self._log(trigger, False, started, error=e)
             return False
         finally:
             if os.path.exists(fresh):
@@ -194,4 +237,39 @@ class Mirror:
                     os.remove(fresh)
                 except OSError:
                     pass
+            self._run_lock.release()
+
+
+class PostgresSync(Mirror):
+    """The other direction, while the SQLite file is the main database: copy it into PostgreSQL.
+
+    Same triggers as the mirror (shortly after commits, every 15 minutes, at shutdown). The copy runs in one
+    PostgreSQL transaction, so PostgreSQL holds either the previous complete copy or the new one, never half of
+    one. While PostgreSQL is unreachable the runs fail quietly and are recorded; the next trigger retries."""
+
+    def __init__(self, source, target, path, **kw):
+        super().__init__(source, path, **kw)
+        self.target = target
+        self.meta_path = self.path + ".sync.json"
+        self.direction = "sqlite→postgresql"
+
+    def run(self, wait=False, trigger="manual"):
+        if not self._run_lock.acquire(blocking=wait):
+            self.mark_dirty("retry")
+            return False
+        started, pending, snap = time.monotonic(), self.pending, {}
+        try:
+            _, mismatches = replicate.copy_all(self.primary, self.target, snapshot=snap)
+            if mismatches:
+                raise RuntimeError("copy did not verify: " + ", ".join(m[0] for m in mismatches))
+            self._record(True)
+            self.pending = max(0, self.pending - pending)
+            self._log(trigger, True, started, snap)
+            return True
+        except Exception as e:
+            log.warning("sync to PostgreSQL failed: %s", str(e).splitlines()[0][:200])
+            self._record(False, str(e).splitlines()[0])
+            self._log(trigger, False, started, error=e)
+            return False
+        finally:
             self._run_lock.release()

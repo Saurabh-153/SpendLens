@@ -83,10 +83,10 @@ def apply_due_sips(session, today=None):
             else:
                 break  # priced holding without a price: nothing sensible to add
             due = _due_date(m, h.sip_day).isoformat()
-            session.add(SipLog(holding_id=h.id, holding_name=h.name, month=m, sip_date=due, amount=amt, applied_at=_now_utc_text()))
+            session.add(SipLog(user_id=h.user_id, holding_id=h.id, holding_name=h.name, month=m, sip_date=due, amount=amt, applied_at=_now_utc_text()))
             unit_priced = h.asset_type not in DIRECT or (h.asset_type == "MF" and (h.units or 0) > 0)
             nav = (h.nav if h.asset_type == "MF" else cmp_) if unit_priced else 0
-            session.add(LedgerTransaction(holding_id=h.id, name=h.name, tx_date=due, kind="BUY", qty=amt / nav if nav else 0,
+            session.add(LedgerTransaction(user_id=h.user_id, holding_id=h.id, name=h.name, tx_date=due, kind="BUY", qty=amt / nav if nav else 0,
                                           price=nav or 0, amount=amt, source="sip", applied=1))
             applied, n = m, n + 1
             m = _next(m)

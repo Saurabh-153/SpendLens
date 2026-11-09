@@ -8,6 +8,7 @@ async function req<T>(path: string, method = 'GET', body?: unknown): Promise<T> 
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!res.ok) {
+    if (res.status === 401 && path !== '/auth/login') window.dispatchEvent(new Event('spendlens:signed-out'))   // the session ended: App shows the sign-in screen
     const detail = await res.json().catch(() => null)
     const d = detail?.detail   // FastAPI sends a list of {msg, loc} when a request fails validation
     throw new Error(Array.isArray(d) ? d.map((e: { msg?: string }) => e.msg).join('; ') : d ?? `Request failed (${res.status})`)
@@ -33,7 +34,7 @@ export interface MonthlyGrid {
   total_spent: number; total_cashback: number; income: number; budget_cap: number
 }
 
-export interface DashboardCategory { id: number; name: string; icon: string; color: string; target_pct: number; spent: number; pct: number; prev_spent: number }
+export interface DashboardCategory { id: number; name: string; icon: string; color: string; target_pct: number; spent: number; pct: number; prev_spent: number; history: number[] }
 export interface DashboardData {
   month: string; income: number; budget_cap: number; total_spent: number; total_cashback: number
   biggest_cat: { name: string; icon: string } | null; biggest_cat_amt: number; extra_saving: number
@@ -52,11 +53,49 @@ export interface Holding {
 }
 export type HoldingInput = Pick<Holding, 'name' | 'ticker' | 'asset_type' | 'sector' | 'qty' | 'buy_price' | 'cmp' | 'notes' | 'tags' | 'exposure' | 'grp' | 'sip_amount' | 'sip_day' | 'maturity' | 'rate' | 'start_date' | 'compounding' | 'rd' | 'credits' | 'manual'>
 
+export type DbKind = 'postgresql' | 'sqlite'
 export interface DbStatus {
-  primary: 'postgresql' | 'sqlite'; mode: 'normal' | 'read-only-fallback'
+  primary: DbKind; mode: 'normal' | 'read-only-fallback'; switching: boolean; can_switch: boolean
   mirror: { path_name: string; updated_at: string | null; last_error: string | null } | null
+  copy: { to: DbKind; updated_at: string | null; last_error: string | null } | null
 }
 export const getStatus = () => req<DbStatus>('/status')
+export const switchDatabase = (to: DbKind) => req<DbStatus>('/database/switch', 'POST', { to })
+
+export interface DbCard {
+  kind: DbKind; name: string; role: 'main' | 'copy'; reachable: boolean; latency_ms?: number | null
+  rows?: number | null; tables?: number | null; size_bytes?: number | null; where?: string
+  last_save_at?: string | null; updated_at?: string | null; last_error?: string | null
+}
+export interface SyncRun {
+  id: number; at: string; direction: string; trigger: string; ok: boolean; error: string | null; duration_ms: number | null
+  rows_total: number | null; tables_total: number | null; rows_added: number | null; rows_changed: number | null
+  rows_removed: number | null; tables_changed: number | null
+}
+export interface Abnormality { level: 'critical' | 'warning' | 'info'; title: string; detail: string }
+export interface DbTableRow {
+  name: string; area: string; main_rows: number | null; copy_rows: number | null
+  last_change: [number, number, number]; compared_match: boolean | null
+}
+export interface DbOverview extends Omit<DbStatus, 'copy'> {
+  main: DbCard; copy: DbCard | null
+  kpis: null | {
+    last_sync: Pick<SyncRun, 'at' | 'direction' | 'trigger' | 'ok' | 'error' | 'duration_ms'> | null
+    in_sync: { rows: number | null; tables: number; matching: number }
+    today: { syncs: number; failed: number; rows_changed: number; tables_changed: number }
+    health_7d: { syncs: number; failed: number; rows_changed: number; tables_changed: number; rate: number | null }
+    pending: number
+  }
+  tables: DbTableRow[]
+  last_compare: { at: string; ok: boolean; differs: number; pending: number } | null
+  abnormalities: Abnormality[]
+}
+export interface DbSwitch { id: number; at: string; from_kind: DbKind; to_kind: DbKind; ok: boolean; error: string | null; rows_total: number | null; tables_total: number | null; pause_ms: number }
+export interface DbHistory { days: { date: string; syncs: number; failed: number; rows_changed: number }[]; runs: SyncRun[]; switches: DbSwitch[]; keep_days: number }
+export interface DbCompare { at: string; ok: boolean; pending: number; differs: number; tables: { name: string; area: string; main_rows: number; copy_rows: number | null; match: boolean }[] }
+export const getDbOverview = () => req<DbOverview>('/database/overview')
+export const getDbHistory = (days = 14) => req<DbHistory>(`/database/history?days=${days}`)
+export const compareDatabases = () => req<DbCompare>('/database/compare', 'POST')
 
 export const getGrid = (month: string) => req<MonthlyGrid>(`/expenses/monthly-grid?month=${month}`)
 export interface ForecastRange { p10: number; p50: number; p90: number }
@@ -86,6 +125,7 @@ export const createHolding = (h: HoldingInput) => req<Holding>('/holdings', 'POS
 export const updateHolding = (id: number, h: HoldingInput) => req<Holding>(`/holdings/${id}`, 'PUT', h)
 export const deleteHolding = (id: number) => req(`/holdings/${id}`, 'DELETE')
 export const portfolioCsvUrl = `${API_BASE}/export/portfolio`
+export const mfReportPdfUrl = (id: number) => `${API_BASE}/mf/reports/${id}/pdf`
 
 export interface Category {
   id: number; name: string; icon: string; color: string; target_pct: number; hint: string
@@ -147,7 +187,25 @@ export const setHoldingSip = (id: number, sip_amount: number, sip_day: number) =
 export interface SipLogRow { id: number; holding_name: string; month: string; sip_date: string; amount: number }
 export const getSipLog = () => req<SipLogRow[]>('/sip-log')
 
-export interface PortfolioGoal { id: number; name: string; target_amount: number; target_year: number }
+/** large: paid from the corpus (simulated). small / recurring: paid from the monthly set-aside (`commitments`). */
+export type GoalKind = 'large' | 'small' | 'recurring'
+export interface PortfolioGoal {
+  id: number; name: string; target_amount: number; target_year: number; kind: GoalKind; target_month: number | null
+  // recurring only: repeats every N months from target_month/target_year, rising yearly, until end_year
+  every_months: number; end_year: number | null; escalation_pct: number; category_id: number | null; subcategory_id: number | null
+}
+export interface CommitPayment { goal_id: number; name: string; kind: 'small' | 'recurring'; month: string; amount: number }
+export interface SmallGoalPlan { id: number; name: string; month: string; amount: number; months_left: number; per_month: number }
+export interface RecurringPlan {
+  id: number; name: string; every_months: number; month: number; escalation_pct: number; end_year: number | null
+  next: { month: string; amount: number } | null; yearly: { year: number; amount: number }[]
+  link: string | null; spent: number | null; planned: number | null; since: string | null
+}
+export interface Commitments {
+  months: number; start: string; set_aside: number; top_up: number
+  income: number; spend: number; sip: number; surplus: number
+  payments: CommitPayment[]; small: SmallGoalPlan[]; recurring: RecurringPlan[]
+}
 export interface GoalResult extends PortfolioGoal { probability: number; conservative: number }
 export interface BandPoint { year: number; p10: number; p50: number; p90: number }
 export interface DriftRow { group: string; value: number; actual_pct: number; target_pct: number; drift_pct: number; trade: number }
@@ -155,17 +213,26 @@ export interface PerfRow { name: string; type: string; invested: number; present
 export interface PortfolioKpis {
   total: number; invested: number; pl: number; pl_pct: number
   returns: { xirr: number | null; span_days: number; change: number | null; change_pct: number | null; since: string | null }
-  sip: { monthly: number; yearly: number; pct_of_portfolio: number; savings_rate: number | null; income: number }
+  sip: { monthly: number; yearly: number; by_mix: { Equity: number; Gold: number; Debt: number }; pct_of_portfolio: number; savings_rate: number | null; income: number }
   safety: { emergency: number; monthly_spend: number; cover_months: number | null }
   locked_pct: number
   groups: Record<string, { present: number; invested: number; sip: number; count: number }>
   drift: DriftRow[]
-  concentration: { top: { name: string; pct: number } | null; top5_pct: number; over_10: { name: string; pct: number }[]; sectors: { sector: string; value: number; pct: number }[] }
+  concentration: {
+    top: { name: string; pct: number } | null; top5_pct: number; over_10: { name: string; pct: number }[]
+    sectors: { sector: string; value: number; pct: number }[]
+    ranked: { name: string; type: string; value: number; pct: number }[] // the 10 largest positions (folios merged)
+  }
   performers: { best: PerfRow[]; worst: PerfRow[] }
-  fixed: { avg_rate: number | null; rated_value: number; maturing: { name: string; date: string; value: number }[] }
+  fixed: {
+    avg_rate: number | null; rated_value: number; maturing: { name: string; date: string; value: number }[]
+    ladder: { name: string; date: string; value: number; rate: number | null }[] // maturities in the next 5 years
+  }
+  liquidity: { instant: number; days: number; fixed: number; locked: number } // value by how fast it can be reached
   history: { date: string; total: number; invested: number }[]
   forecast: { band: BandPoint[]; conservative_band: BandPoint[]; start: number; monthly_sip: number; goals: GoalResult[]; paths: number } | null
   extra_sip_needed: number
+  commitments: Commitments
   prices: { last_ok: string | null; auto_count: number }
   ledger: { xirr: number | null; covered_pct: number; fy: string; dividends: number; realized: number }
 }
@@ -223,28 +290,116 @@ export const suggestPrice = (id: number) => req<{ type: string; options: PriceOp
 export const unitsFromValue = (id: number) => req<{ units: number; nav: number }>(`/prices/units-from-value/${id}`, 'POST')
 export const autoMapPrices = () => req<{ mapped: string[]; skipped: string[] }>('/prices/auto-map', 'POST')
 
-export type TxKind = 'BUY' | 'SELL' | 'DIVIDEND' | 'OPENING'
-export interface Tx {
-  id: number; holding_id: number | null; name: string; tx_date: string; kind: TxKind; qty: number; price: number
-  amount: number; fees: number; realized: number; note: string; source: string; applied: number; fy: string
+// ---------------------------------------------------------------- stock ledger (broker tradebooks, dividends, XIRR)
+
+export type EquityAccount = string   // the user's demat label, e.g. "SK"; "ALL" combines them
+export interface EquityStock {
+  symbol: string; name: string; status: 'held' | 'exited'; qty: number; invested: number; avg_cost: number | null
+  price: number | null; price_date: string; value: number | null; unrealized: number | null; realized: number; dividends: number
+  xirr: number | null; xirr_ex_div: number | null; xirr_note: string | null; first_date: string | null; exit_date: string | null
+  accounts: Record<string, number>
+  /** every sale and priced buyback, as traded */
+  sold_qty: number; sale_value: number
+  /** the closing sales after the last purchase; null while the stock is held */
+  exit_qty: number | null; exit_price: number | null; exit_value: number | null
+  /** exited stocks: splits since the exit (shares now per share sold), the exit price on today's basis,
+   *  today's price against it, and what the exit shares would be worth today */
+  split_factor_since_exit: number | null; exit_price_adj: number | null; change_since_exit_pct: number | null; exit_value_now: number | null
 }
-export interface TxInput {
-  holding_id: number | null; name?: string; tx_date: string; kind: TxKind; qty?: number; price?: number; amount?: number; fees?: number; note?: string; apply?: number
+export interface DividendRow { symbol: string; status: 'held' | 'exited'; total: number; sources: string[]; by_quarter: Record<string, number>; by_year: Record<string, number> }
+export interface EquitySummary {
+  accounts: string[]; account: EquityAccount; as_of: string; current_fy: string
+  kpis: {
+    value: number; invested: number; unrealized: number; realized: number; dividends_total: number; dividends_fy: number
+    xirr: number | null; xirr_ex_div: number | null; xirr_coverage_pct: number | null; held_count: number; exited_count: number
+  }
+  stocks: EquityStock[]
+  dividends: { quarters: string[]; years: string[]; rows: DividendRow[]; totals_by_quarter: Record<string, number>; totals_by_year: Record<string, number> }
+  coverage: Record<string, { statement_to: string | null; last_trade: string | null }>
+  issue_counts: { error: number; warning: number; info: number }
 }
-export interface FyRow { fy: string; dividends: number; realized: number; bought: number; sold: number }
-export interface HoldingReturn { id: number; name: string; grp: string; type: string; invested: number; present: number; dividends: number; since: string | null; xirr: number | null; covered: boolean }
-export interface LedgerSummary {
-  fy: FyRow[]; current_fy: string; dividends_total: number; realized_total: number
-  xirr: { portfolio: number | null; covered_pct: number; holdings: HoldingReturn[] }
+export interface EquityIssue {
+  level: 'error' | 'warning' | 'info'; kind: string; account: string; symbol: string; date: string; date_to?: string; count?: number
+  expected?: number; replay?: number; delta?: number; message: string; hint?: string
 }
-export const getTransactions = (q: { kind?: string; fy?: string; holding_id?: number; limit?: number } = {}) => {
-  const p = new URLSearchParams()
-  Object.entries(q).forEach(([k, v]) => v && p.set(k, String(v)))
-  return req<{ total: number; rows: Tx[] }>(`/transactions?${p}`)
+export interface EquityAuditRow { id: number; at: string; kind: string; account: string; file_name: string; period_from: string; period_to: string; summary: string }
+export interface EquityAudit { issues: EquityIssue[]; log: EquityAuditRow[]; holdings_checks: { account: string; as_of: string; total: number; matched: number }[] }
+export type EquityEventKind = 'SPLIT' | 'BONUS' | 'BUYBACK' | 'TRANSFER_OUT' | 'IPO' | 'TRANSFER_IN' | 'ADJUST' | 'DEMERGER' | 'MERGER' | 'RENAME'
+export interface EquityEventInput {
+  account: string; symbol: string; ex_date: string; kind: EquityEventKind; ratio_new: number; ratio_old: number
+  qty: number; price: number | null; target_symbol: string; cost_pct: number; note: string
 }
-export const addTransaction = (t: TxInput) => req<{ id: number }>('/transactions', 'POST', t)
-export const deleteTransaction = (id: number) => req(`/transactions/${id}`, 'DELETE')
-export const getLedgerSummary = () => req<LedgerSummary>('/ledger/summary')
+export interface EquityEvent extends EquityEventInput { id: number; source: 'manual' | 'yahoo' | 'builtin' }
+export interface EquityTimelineRow { date: string; account: string; kind: string; qty: number; price: number | null; amount: number; qty_after: number; note: string }
+export interface EquityStockDetail {
+  symbol: string; timeline: EquityTimelineRow[]; events: EquityEvent[]
+  dividends: { date: string; account: string; qty: number; dps: number; amount: number; source: string }[]
+}
+export interface EquityRefreshResult {
+  summary: string; fetched: number; failed: number; errors: { symbol: string; error: string }[]; splits_added: [string, string, string][]
+  dividends_added: number; dividends_updated: number; dividends_removed: number; warnings: number; ran_at: string
+}
+const acct = (a: EquityAccount) => `account=${encodeURIComponent(a || 'ALL')}`
+export const getEquitySummary = (a: EquityAccount) => req<EquitySummary>(`/equity/summary?${acct(a)}`)
+export const getEquityAudit = (a: EquityAccount) => req<EquityAudit>(`/equity/audit?${acct(a)}`)
+export const getEquityAuditEntry = (id: number) => req<EquityAuditRow & { detail: unknown }>(`/equity/audit/${id}`)
+export const getEquityStock = (symbol: string, a: EquityAccount) => req<EquityStockDetail>(`/equity/stock/${encodeURIComponent(symbol)}?${acct(a)}`)
+
+// ---------------------------------------------------------------- MF analysis (from factsheets read by Claude Code)
+
+export type MfPositionStatus = 'new' | 'added' | 'trimmed' | 'exited' | 'held'
+export interface MfTrendRow {
+  stock: string; isin: string; sector: string; status: MfPositionStatus
+  /** shares: real buying / selling; weight: only the % of the fund was printed, which also moves with price */
+  basis: 'shares' | 'weight'
+  from_pct: number | null; to_pct: number | null; weight_change: number
+  from_qty: number | null; to_qty: number | null; qty_change_pct: number | null
+  /** e.g. a split / bonus: the share counts were compared after adjusting for it */
+  note?: string
+}
+export interface MfChange { from: string; to: string; rows: MfTrendRow[]; counts: Record<MfPositionStatus, number>; basis: 'shares' | 'weight' | null }
+export interface MfTrends { years: (MfChange & { year: string })[]; latest: MfChange | null; months_with_holdings: string[] }
+export interface MfMove {
+  stock: string; isin: string; sector: string; buying: string[]; selling: string[]; new_in: string[]; exited_from: string[]
+  weight_change: number; net: number
+}
+export interface MfMoves { funds: number; latest: MfMove[]; by_year: Record<string, MfMove[]> }
+export interface MfApiFund {
+  key: string; name: string; plan: string; amc: string; amfi_code: string; category: string; benchmark: string
+  held: boolean; value: number; months: string[]; latest_month: string
+  latest: Record<string, number | null>
+  series: Record<'ter' | 'aum' | 'beta' | 'sharpe' | 'top10' | 'cash' | 'rolling3y', { month: string; value: number }[]>
+  manager: string; manager_years: number | null; managers: { name: string; since: string }[]; as_on: string
+  cap_mix: { large: number | null; mid: number | null; small: number | null }
+  holdings_count: number; trends: MfTrends
+  reports: MfReport[]
+}
+export interface MfCheck { metric: string; factsheet: number | string | null; morningstar: number | string | null; diff: number | null; status: 'ok' | 'differs' | 'info' | 'missing'; note: string }
+/** A Morningstar fund report, stored to cross-check the AMC's factsheet (month = its portfolio date). */
+export interface MfReport {
+  id: number; has_pdf: boolean; source: string; scheme: string; report_date: string; month: string; compared_month: string | null; file: string
+  rating_stars: number | null; risk: Record<string, number | null>
+  trailing: Record<string, { fund: number; benchmark: number; category: number }>
+  allocation: Record<string, number | null>; top10: { name: string; pct: number }[]; equity_holdings: number | null
+  manager: string; net_assets_cr: number | null; expense_ratio: number | null; checks: MfCheck[]
+}
+export interface MfAnomalyRow { severity: 'high' | 'medium' | 'low'; month: string; fund: string; rule: string; detail: string }
+export interface MfAnalysisData {
+  has_data: boolean; funds: MfApiFund[]; anomalies: MfAnomalyRow[]
+  overlap: { a: string; b: string; pct: number; shared: string[]; count?: number; partial?: boolean }[]
+  coverage: { amc: string; months: { month: string; loaded: boolean }[] }[]
+  unmatched_holdings: { name: string; scheme_code: string }[]
+  latest_month: string | null
+  sources: { month: string; file: string; kind: string; amc: string; funds: number; notes: string; imported_at: string }[]
+  market_moves: MfMoves
+}
+export const getMfAnalysis = () => req<MfAnalysisData>('/mf/analysis')
+export const getEquityEvents = () => req<{ events: EquityEvent[]; kinds: EquityEventKind[] }>('/equity/events')
+export const addEquityEvent = (e: EquityEventInput) => req<{ id: number }>('/equity/events', 'POST', e)
+export const updateEquityEvent = (id: number, e: EquityEventInput) => req<{ ok: true }>(`/equity/events/${id}`, 'PUT', e)
+export const deleteEquityEvent = (id: number) => req<{ ok: true }>(`/equity/events/${id}`, 'DELETE')
+export const setEquityYahooSymbol = (symbol: string, yahoo_symbol: string) => req<{ ok: true }>(`/equity/securities/${encodeURIComponent(symbol)}`, 'PUT', { yahoo_symbol })
+export const refreshEquity = () => req<EquityRefreshResult>('/equity/refresh', 'POST')
 
 // ---------------------------------------------------------------- credit cards
 
@@ -497,3 +652,33 @@ export const deleteTracker = (id: number) => req(`/trackers/${id}`, 'DELETE')
 export const reorderTrackers = (ids: number[]) => req('/trackers/reorder', 'PUT', { ids })
 export const setTrackerDay = (id: number, date: string, done: boolean) => req(`/trackers/${id}/days/${date}`, 'PUT', { done })
 export const moveReminder = (id: number, m: { month: string; day: number; scope: 'all' | 'month' }) => req<Reminder>(`/reminders/${id}/move`, 'PUT', m)
+
+// ---- sign-in, modules and access requests
+export type ModuleId = 'expense' | 'holdings' | 'ledger' | 'cards'
+export interface ModuleInfo { id: ModuleId; label: string; description: string }
+export interface AccessRequest {
+  id: number; user_id: number; module: ModuleId; note: string; status: 'pending' | 'approved' | 'rejected'
+  created_at: string; decided_by: number | null; decided_at: string | null; decision_note: string
+  user_email?: string; user_name?: string
+}
+export interface Me {
+  id: number; email: string; name: string; role: 'admin' | 'user'; is_active: boolean; created_at: string
+  modules: ModuleId[]; all_modules: ModuleInfo[]; requests: AccessRequest[]; pending_requests: number
+}
+export interface AdminUser {
+  id: number; email: string; name: string; role: 'admin' | 'user'; is_active: boolean; created_at: string
+  modules: ModuleId[]; pending?: ModuleId[]
+}
+export const login = (email: string, password: string) => req<Me>('/auth/login', 'POST', { email, password })
+export const logout = () => req('/auth/logout', 'POST')
+export const getMe = () => req<Me>('/auth/me')
+export const changePassword = (current_password: string, new_password: string) => req('/auth/password', 'POST', { current_password, new_password })
+/** Forgotten password: the server accepts this only from the computer it runs on. */
+export const resetPasswordLocal = (email: string, new_password: string, code: string) => req<{ ok: true }>('/auth/reset-local', 'POST', { email, new_password, code })
+export const requestAccess = (module: ModuleId, note: string) => req<AccessRequest>('/access/requests', 'POST', { module, note })
+export const getAdminUsers = () => req<{ modules: ModuleInfo[]; users: AdminUser[] }>('/admin/users')
+export const createAdminUser = (u: { email: string; name: string; password: string; role: 'admin' | 'user'; modules: ModuleId[] }) => req<AdminUser>('/admin/users', 'POST', u)
+export const updateAdminUser = (id: number, u: { name?: string; role?: 'admin' | 'user'; is_active?: boolean; password?: string }) => req<AdminUser>(`/admin/users/${id}`, 'PATCH', u)
+export const setUserModules = (id: number, modules: ModuleId[]) => req<AdminUser>(`/admin/users/${id}/modules`, 'PUT', { modules })
+export const getAccessRequests = (status?: AccessRequest['status']) => req<AccessRequest[]>(`/admin/access/requests${status ? `?status=${status}` : ''}`)
+export const decideAccessRequest = (id: number, approve: boolean, note: string) => req<AccessRequest>(`/admin/access/requests/${id}/${approve ? 'approve' : 'reject'}`, 'POST', { note })
