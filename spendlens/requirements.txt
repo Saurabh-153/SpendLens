@@ -7,6 +7,6 @@ openpyxl>=3.1         # reading Excel activity exports (American Express) and MF
 xlrd==2.0.1           # old binary .xls MF portfolio disclosures (some AMC months are published that way)
 sqlalchemy>=2.0       # ORM layer; backs onto SQLite now, Postgres later via DATABASE_URL
 alembic>=1.13         # schema migrations, replaces the hand-rolled MIGRATIONS list in database.py
-holidays==0.105       # India and US public holidays shown on the reminder calendar
+holidays==0.108       # India and US public holidays shown on the reminder calendar
 psycopg[binary]==3.3.6  # PostgreSQL driver: used when DATABASE_URL / TEST_DATABASE_URL is postgresql+psycopg://
 bcrypt>=4.0         # password hashing for logins
