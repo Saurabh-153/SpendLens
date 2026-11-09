@@ -1,7 +1,7 @@
 fastapi>=0.141.1      # 0.141+: refuses a JSON body sent without a Content-Type (cross-site form posts); brings a patched Starlette
 uvicorn[standard]>=0.30.0
 pypdf>=6.19           # reading password-protected credit-card statements
-python-multipart>=0.0.20  # (0.0.18+ fixes CVE-2024-53981) statement file uploads
+python-multipart>=0.0.33  # (0.0.18+ fixes CVE-2024-53981) statement file uploads
 anthropic>=0.40       # optional: Claude fallback for unrecognised statement formats (needs ANTHROPIC_API_KEY)
 openpyxl>=3.1         # reading Excel activity exports (American Express) and MF portfolio disclosures
 xlrd==2.0.1           # old binary .xls MF portfolio disclosures (some AMC months are published that way)
